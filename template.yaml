@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: GHL webhook listener (signature check + Redis allowlist + enqueue)
+
+Parameters:
+  DeployEnvironment:
+    Type: String
+    Default: staging
+  VpcSubnetIds:
+    Type: String
+  VpcSecurityGroupIds:
+    Type: String
+  RedisUrl:
+    Type: String
+  AllowlistKey:
+    Type: String
+    Default: ghl:webhook:allowlist
+  QueueName:
+    Type: String
+    Default: ghl-contact-update
+  GhlPublicKey:
+    Type: String
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 10
+    MemorySize: 256
+    Tracing: Active
+
+Resources:
+  GhlWebhookListenerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ghl-webhook-listener-${DeployEnvironment}
+      Handler: handler.handler
+      CodeUri: src
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+      VpcConfig:
+        SecurityGroupIds: !Split [",", !Ref VpcSecurityGroupIds]
+        SubnetIds: !Split [",", !Ref VpcSubnetIds]
+      Environment:
+        Variables:
+          REDIS_URL: !Ref RedisUrl
+          GHL_WEBHOOK_ALLOWLIST_KEY: !Ref AllowlistKey
+          GHL_WEBHOOK_QUEUE_NAME: !Ref QueueName
+          GHL_WEBHOOK_PUBLIC_KEY: !Ref GhlPublicKey
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: false
+        EntryPoints:
+          - handler.ts
+
+Outputs:
+  GhlWebhookListenerArn:
+    Description: GHL webhook listener Lambda ARN
+    Value: !GetAtt GhlWebhookListenerFunction.Arn
