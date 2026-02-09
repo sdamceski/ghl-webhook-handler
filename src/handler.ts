@@ -63,6 +63,16 @@ const getSignatureHeader = (headers: Record<string, string | undefined> | undefi
   return key ? headers[key] : undefined;
 };
 
+const decodeSignature = (signature: string | undefined): string | undefined => {
+  if (!signature) return signature;
+  if (!signature.includes('%')) return signature;
+  try {
+    return decodeURIComponent(signature);
+  } catch {
+    return signature;
+  }
+};
+
 const verifyWebhookSignature = (rawBody: Buffer | null, signature: string | undefined, publicKey: string): boolean => {
   if (!rawBody || !signature) {
     return false;
@@ -99,12 +109,19 @@ const isAllowedLocation = async (redis: IORedis, allowlistKey: string, locationI
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const { redisUrl, allowlistKey, queueName, publicKey } = getEnvConfig();
 
+  console.log('[ghl-webhook] request received', {
+    requestId: event.requestContext?.requestId,
+    hasBody: Boolean(event.body),
+    isBase64Encoded: event.isBase64Encoded
+  });
+
   const rawBody = event.body
     ? Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8')
     : null;
   const payload = parseBody(rawBody ? rawBody.toString('utf8') : null);
 
   if (!payload) {
+    console.warn('[ghl-webhook] invalid payload');
     return {
       statusCode: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -112,8 +129,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     };
   }
 
-  const signature = getSignatureHeader(event.headers);
+  const signature = decodeSignature(getSignatureHeader(event.headers));
   if (!verifyWebhookSignature(rawBody, signature, publicKey)) {
+    console.warn('[ghl-webhook] invalid signature');
     return {
       statusCode: 401,
       headers: { 'Content-Type': 'application/json' },
@@ -122,6 +140,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   }
 
   const { locationId, appId } = extractWebhookIds(payload);
+  console.log('[ghl-webhook] extracted ids', { locationId, appId });
 
   const redis = new IORedis(redisUrl);
   const queue = new Queue(queueName, { connection: redis });
@@ -129,6 +148,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   try {
     const allowed = await isAllowedLocation(redis, allowlistKey, locationId);
     if (!allowed) {
+      console.log('[ghl-webhook] ignored location', { locationId, allowlistKey });
       return {
         statusCode: 202,
         headers: { 'Content-Type': 'application/json' },
@@ -142,6 +162,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       appId,
       payload
     });
+
+    console.log('[ghl-webhook] queued payload', { locationId, appId, queueName });
 
     return {
       statusCode: 202,
