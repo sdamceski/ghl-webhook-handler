@@ -6,20 +6,28 @@ Parameters:
   DeployEnvironment:
     Type: String
     Default: staging
+  FunctionName:
+    Type: String
+    Default: ghl-webhook-events-staging
   VpcSubnetIds:
     Type: String
   VpcSecurityGroupIds:
     Type: String
-  RedisUrl:
+  SecretsManagerArn:
     Type: String
+    Default: arn:aws:secretsmanager:us-east-2:214046906223:secret:staging-secrets-PT0K6h
+  RedisSecretKey:
+    Type: String
+    Default: REDIS_URL
   AllowlistKey:
     Type: String
     Default: ghl:webhook:allowlist
   QueueName:
     Type: String
-    Default: ghl-contact-update
-  GhlPublicKey:
+    Default: ghl-inbound-contact-update
+  PublicKeySecretKey:
     Type: String
+    Default: GHL_WEBHOOK_PUBLIC_KEY
 
 Globals:
   Function:
@@ -32,9 +40,9 @@ Resources:
   GhlWebhookListenerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub ghl-webhook-listener-${DeployEnvironment}
+      FunctionName: !Ref FunctionName
       Handler: handler.handler
-      CodeUri: src
+      CodeUri: .
       Policies:
         - AWSLambdaVPCAccessExecutionRole
       VpcConfig:
@@ -42,10 +50,10 @@ Resources:
         SubnetIds: !Split [",", !Ref VpcSubnetIds]
       Environment:
         Variables:
-          REDIS_URL: !Ref RedisUrl
+          REDIS_URL: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${RedisSecretKey}}}"
           GHL_WEBHOOK_ALLOWLIST_KEY: !Ref AllowlistKey
           GHL_WEBHOOK_QUEUE_NAME: !Ref QueueName
-          GHL_WEBHOOK_PUBLIC_KEY: !Ref GhlPublicKey
+          GHL_WEBHOOK_PUBLIC_KEY: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${PublicKeySecretKey}}}"
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -53,7 +61,7 @@ Resources:
         Target: es2020
         Sourcemap: false
         EntryPoints:
-          - handler.ts
+          - src/handler.ts
 
 Outputs:
   GhlWebhookListenerArn:
