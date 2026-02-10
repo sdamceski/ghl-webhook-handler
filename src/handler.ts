@@ -17,6 +17,12 @@ type EnvConfig = {
   publicKey: string;
 };
 
+type AnalyticsStatus = 'allowed' | 'blocked';
+
+const ANALYTICS_KEY_PREFIX = 'ghl:analytics:hour';
+const DEFAULT_ANALYTICS_TTL_SECONDS = 24 * 60 * 60;
+const DEFAULT_ANALYTICS_BUCKET_MINUTES = 360;
+
 const getEnvConfig = (): EnvConfig => {
   const redisUrl = process.env.REDIS_URL;
   if (!redisUrl) {
@@ -32,7 +38,7 @@ const getEnvConfig = (): EnvConfig => {
     redisUrl,
     publicKey,
     allowlistKey: process.env.GHL_WEBHOOK_ALLOWLIST_KEY ?? 'ghl:webhook:allowlist',
-    queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-contact-update'
+    queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update'
   };
 };
 
@@ -43,6 +49,16 @@ const coerceString = (value: unknown): string | null => {
   if (value === undefined || value === null) return null;
   const text = String(value).trim();
   return text.length ? text : null;
+};
+
+const normalizeEventType = (value: string | null): string | null => {
+  if (!value) return value;
+  if (value === 'ContactUpdate') return value;
+  const normalized = value.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  if (normalized === 'contactupdate' || normalized === 'contactupdated') {
+    return 'ContactUpdate';
+  }
+  return value;
 };
 
 const extractWebhookIds = (payload: unknown): WebhookIds => {
@@ -98,11 +114,71 @@ const parseBody = (body: string | null | undefined): WebhookEnvelope | null => {
   }
 };
 
-const isAllowedLocation = async (redis: IORedis, allowlistKey: string, locationId: string | null): Promise<boolean> => {
-  if (!locationId) {
+const hashPayload = (rawBody: Buffer): string => {
+  const hash = crypto.createHash('sha256');
+  hash.update(rawBody);
+  return hash.digest('hex');
+};
+
+const parseAnalyticsTtlSeconds = (): number => {
+  const raw = process.env.GHL_WEBHOOK_ANALYTICS_TTL_SECONDS;
+  if (!raw) return DEFAULT_ANALYTICS_TTL_SECONDS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ANALYTICS_TTL_SECONDS;
+};
+
+const parseAnalyticsBucketMinutes = (): number => {
+  const raw = process.env.GHL_WEBHOOK_ANALYTICS_BUCKET_MINUTES;
+  if (!raw) return DEFAULT_ANALYTICS_BUCKET_MINUTES;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ANALYTICS_BUCKET_MINUTES;
+};
+
+const getAnalyticsKey = (date: Date): { key: string; expireAt: number } => {
+  const bucketMs = parseAnalyticsBucketMinutes() * 60 * 1000;
+  const bucketStartMs = Math.floor(date.getTime() / bucketMs) * bucketMs;
+  const bucketStart = new Date(bucketStartMs);
+  const year = bucketStart.getUTCFullYear();
+  const month = String(bucketStart.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(bucketStart.getUTCDate()).padStart(2, '0');
+  const hour = String(bucketStart.getUTCHours()).padStart(2, '0');
+  const key = `${ANALYTICS_KEY_PREFIX}:${year}${month}${day}${hour}`;
+  const expireAt = Math.floor(bucketStartMs / 1000) + parseAnalyticsTtlSeconds();
+  return { key, expireAt };
+};
+
+const incrementAnalytics = async (
+  redis: IORedis,
+  status: AnalyticsStatus,
+  locationId: string | null,
+  eventType: string | null
+): Promise<void> => {
+  const normalizedLocation = locationId ?? 'invalid';
+  const normalizedEvent = eventType ?? 'unknown';
+  const { key, expireAt } = getAnalyticsKey(new Date());
+  const field = `location:${normalizedLocation}:event:${normalizedEvent}:${status}`;
+
+  try {
+    const pipeline = redis.multi();
+    pipeline.hincrby(key, field, 1);
+    pipeline.expireat(key, expireAt);
+    await pipeline.exec();
+  } catch (error) {
+    console.warn('[ghl-webhook] analytics increment failed', { error });
+  }
+};
+
+const isAllowedLocation = async (
+  redis: IORedis,
+  allowlistKey: string,
+  locationId: string | null,
+  appId: string | null
+): Promise<boolean> => {
+  if (!locationId || !appId) {
     return false;
   }
-  const isMember = await redis.sismember(allowlistKey, locationId);
+  const scopedKey = `${allowlistKey}:${appId}`;
+  const isMember = await redis.sismember(scopedKey, locationId);
   return isMember === 1;
 };
 
@@ -120,35 +196,40 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     : null;
   const payload = parseBody(rawBody ? rawBody.toString('utf8') : null);
 
-  if (!payload) {
-    console.warn('[ghl-webhook] invalid payload');
-    return {
-      statusCode: 400,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'error', reason: 'invalid_payload' })
-    };
-  }
-
-  const signature = decodeSignature(getSignatureHeader(event.headers));
-  if (!verifyWebhookSignature(rawBody, signature, publicKey)) {
-    console.warn('[ghl-webhook] invalid signature');
-    return {
-      statusCode: 401,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'error', reason: 'invalid_signature' })
-    };
-  }
-
+  const rawEventType = payload ? coerceString(payload.type) ?? 'unknown' : 'unknown';
+  const eventType = normalizeEventType(rawEventType) ?? 'unknown';
   const { locationId, appId } = extractWebhookIds(payload);
-  console.log('[ghl-webhook] extracted ids', { locationId, appId });
-
   const redis = new IORedis(redisUrl);
-  const queue = new Queue(queueName, { connection: redis });
+  let queue: Queue | null = null;
 
   try {
-    const allowed = await isAllowedLocation(redis, allowlistKey, locationId);
+    if (!payload) {
+      console.warn('[ghl-webhook] invalid payload');
+      await incrementAnalytics(redis, 'blocked', locationId, eventType);
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'error', reason: 'invalid_payload' })
+      };
+    }
+
+    const signature = decodeSignature(getSignatureHeader(event.headers));
+    if (!verifyWebhookSignature(rawBody, signature, publicKey)) {
+      console.warn('[ghl-webhook] invalid signature');
+      await incrementAnalytics(redis, 'blocked', locationId, eventType);
+      return {
+        statusCode: 401,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'error', reason: 'invalid_signature' })
+      };
+    }
+
+    console.log('[ghl-webhook] extracted ids', { locationId, appId });
+
+    const allowed = await isAllowedLocation(redis, allowlistKey, locationId, appId);
     if (!allowed) {
       console.log('[ghl-webhook] ignored location', { locationId, allowlistKey });
+      await incrementAnalytics(redis, 'blocked', locationId, eventType);
       return {
         statusCode: 202,
         headers: { 'Content-Type': 'application/json' },
@@ -156,12 +237,21 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
-    await queue.add('ghl-contact-update', {
+    queue = new Queue(queueName, { connection: redis });
+
+    await queue.add('ghl.contact.update', {
       source: 'ghl',
+      eventType,
+      inboundEventId: null,
+      webhookId: coerceString(payload.webhookId ?? payload.webhook_id),
       locationId,
       appId,
+      contactId: coerceString(payload.id ?? payload.contactId ?? payload.contact_id),
+      payloadHash: hashPayload(rawBody as Buffer),
       payload
     });
+
+    await incrementAnalytics(redis, 'allowed', locationId, eventType);
 
     console.log('[ghl-webhook] queued payload', { locationId, appId, queueName });
 
@@ -171,7 +261,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       body: JSON.stringify({ status: 'queued' })
     };
   } finally {
-    await queue.close();
+    if (queue) {
+      await queue.close();
+    }
     await redis.quit();
   }
 };

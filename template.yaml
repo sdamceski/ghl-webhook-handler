@@ -24,7 +24,7 @@ Parameters:
     Default: ghl:webhook:allowlist
   QueueName:
     Type: String
-    Default: ghl-contact-update
+    Default: ghl-inbound-contact-update
   PublicKeySecretKey:
     Type: String
     Default: GHL_WEBHOOK_PUBLIC_KEY
