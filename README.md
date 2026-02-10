@@ -7,7 +7,9 @@ Minimal AWS Lambda that verifies GHL webhook signatures, checks a Redis allowlis
 - `REDIS_URL` (required)
 - `GHL_WEBHOOK_PUBLIC_KEY` (required, PEM)
 - `GHL_WEBHOOK_ALLOWLIST_KEY` (optional, default: `ghl:webhook:allowlist`)
-- `GHL_WEBHOOK_QUEUE_NAME` (optional, default: `ghl-contact-update`)
+- `GHL_WEBHOOK_QUEUE_NAME` (optional, default: `ghl-inbound-contact-update`)
+- `GHL_WEBHOOK_JOB_NAME` (optional, default: `ghl.contact.update`)
+- `GHL_WEBHOOK_CONTACT_DEBOUNCE_MS` (optional, default: `3500`)
 
 ## Build and deploy
 
@@ -19,4 +21,4 @@ sam deploy --guided
 ## Notes
 
 - The allowlist is stored as a Redis set. The Lambda uses `SISMEMBER` on the allowlist key with the `locationId`.
-- The queue name should match the worker's BullMQ queue.
+- The queue name should match the worker's BullMQ queue. Jobs are debounced by job id and removed on completion or failure.
