@@ -15,6 +15,7 @@ type EnvConfig = {
   allowlistKey: string;
   queueName: string;
   publicKey: string;
+  bullmqPrefix: string;
 };
 
 type AnalyticsStatus = 'allowed' | 'blocked';
@@ -22,6 +23,7 @@ type AnalyticsStatus = 'allowed' | 'blocked';
 const ANALYTICS_KEY_PREFIX = 'ghl:analytics:hour';
 const DEFAULT_ANALYTICS_TTL_SECONDS = 24 * 60 * 60;
 const DEFAULT_ANALYTICS_BUCKET_MINUTES = 360;
+const DEFAULT_BULLMQ_PREFIX = '{starauto-bull}';
 
 const getEnvConfig = (): EnvConfig => {
   const redisUrl = process.env.REDIS_URL;
@@ -38,7 +40,8 @@ const getEnvConfig = (): EnvConfig => {
     redisUrl,
     publicKey,
     allowlistKey: process.env.GHL_WEBHOOK_ALLOWLIST_KEY ?? 'ghl:webhook:allowlist',
-    queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update'
+    queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update',
+    bullmqPrefix: process.env.GHL_WEBHOOK_BULLMQ_PREFIX ?? DEFAULT_BULLMQ_PREFIX
   };
 };
 
@@ -183,7 +186,7 @@ const isAllowedLocation = async (
 };
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const { redisUrl, allowlistKey, queueName, publicKey } = getEnvConfig();
+  const { redisUrl, allowlistKey, queueName, publicKey, bullmqPrefix } = getEnvConfig();
 
   console.log('[ghl-webhook] request received', {
     requestId: event.requestContext?.requestId,
@@ -237,7 +240,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
-    queue = new Queue(queueName, { connection: redis });
+    queue = new Queue(queueName, { connection: redis, prefix: bullmqPrefix });
 
     await queue.add('ghl.contact.update', {
       source: 'ghl',

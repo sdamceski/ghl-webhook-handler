@@ -18,6 +18,13 @@ sam build
 sam deploy --guided
 ```
 
+### Staging VPC defaults
+
+The staging Lambda uses the following VPC settings (also stored in `samconfig.toml`):
+
+- Subnets: `subnet-0c3eb48074c9eb460`, `subnet-01f346da002897e45`
+- Security group: `sg-0fd9f6b3c0ded8db2`
+
 ## Notes
 
 - The allowlist is stored as Redis sets. The Lambda uses `SISMEMBER` on `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with the `locationId`.
