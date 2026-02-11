@@ -25,6 +25,19 @@ The staging Lambda uses the following VPC settings (also stored in `samconfig.to
 - Subnets: `subnet-0c3eb48074c9eb460`, `subnet-01f346da002897e45`
 - Security group: `sg-0fd9f6b3c0ded8db2`
 
+### Production deployment
+
+- Uses the same private subnets as staging (`subnet-0c3eb48074c9eb460`, `subnet-01f346da002897e45`).
+- Attaches to the production ECS security group `sg-08b80a28bdddf7270` so the Lambda can reach the production Redis cluster (`sg-0d8764f140bca583e` allows that SG).
+- Secrets source: `arn:aws:secretsmanager:us-east-2:214046906223:secret:starauto-production-secrets-TjSyhm` (must expose `REDIS_URL` and `GHL_WEBHOOK_PUBLIC_KEY`).
+
+Deploy with:
+
+```bash
+sam build
+sam deploy --config-env production
+```
+
 ## Notes
 
 - The allowlist is stored as Redis sets. The Lambda uses `SISMEMBER` on `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with the `locationId`.

@@ -23,3 +23,15 @@ region = "us-east-2"
 
 [staging.global.parameters]
 region = "us-east-2"
+
+[production.deploy.parameters]
+stack_name = "ghl-webhook-events-production"
+resolve_s3 = true
+s3_prefix = "ghl-webhook-events-production"
+region = "us-east-2"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "DeployEnvironment=\"production\" FunctionName=\"ghl-webhook-events-production\" VpcSubnetIds=\"subnet-0c3eb48074c9eb460,subnet-01f346da002897e45\" VpcSecurityGroupIds=\"sg-08b80a28bdddf7270\" SecretsManagerArn=\"arn:aws:secretsmanager:us-east-2:214046906223:secret:starauto-production-secrets-TjSyhm\" RedisSecretKey=\"REDIS_URL\" AllowlistKey=\"ghl:webhook:allowlist\" QueueName=\"ghl-inbound-contact-update\" PublicKeySecretKey=\"GHL_WEBHOOK_PUBLIC_KEY\""
+image_repositories = []
+
+[production.global.parameters]
+region = "us-east-2"
