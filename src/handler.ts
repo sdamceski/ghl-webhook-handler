@@ -20,10 +20,34 @@ type EnvConfig = {
 
 type AnalyticsStatus = 'allowed' | 'blocked';
 
+type RollupJobData = {
+  source: 'ghl';
+  eventType: string;
+  inboundEventId: number | null;
+  webhookId: string | null;
+  locationId: string | null;
+  appId: string | null;
+  contactId: string | null;
+  payloadHash: string;
+  payload: Record<string, unknown>;
+  rollupKey?: string;
+  rollupJobId?: string;
+};
+
+type RollupRecord = {
+  jobId: string;
+  updatedAt: number;
+  data: RollupJobData;
+};
+
 const ANALYTICS_KEY_PREFIX = 'ghl:analytics:hour';
 const DEFAULT_ANALYTICS_TTL_SECONDS = 24 * 60 * 60;
 const DEFAULT_ANALYTICS_BUCKET_MINUTES = 360;
 const DEFAULT_BULLMQ_PREFIX = '{starauto-bull}';
+const ROLLUP_DELAY_MS = 3500;
+const ROLLUP_TTL_MS = 60_000;
+const CONTACT_EVENT_TYPES = new Set(['ContactCreate', 'ContactUpdate', 'ContactTagUpdate']);
+const CONTACT_ROLLUP_PREFIX = 'ghl:contact-rollup';
 
 const getEnvConfig = (): EnvConfig => {
   const redisUrl = process.env.REDIS_URL;
@@ -121,6 +145,32 @@ const hashPayload = (rawBody: Buffer): string => {
   const hash = crypto.createHash('sha256');
   hash.update(rawBody);
   return hash.digest('hex');
+};
+
+const buildRollupKey = (appId: string | null, locationId: string | null, contactId: string | null): string | null => {
+  if (!appId || !locationId || !contactId) {
+    return null;
+  }
+  return `${CONTACT_ROLLUP_PREFIX}:${appId}:${locationId}:${contactId}`;
+};
+
+const parseRollupRecord = (raw: string | null): RollupRecord | null => {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as RollupRecord;
+    if (!parsed || typeof parsed.jobId !== 'string' || !parsed.data) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const writeRollupRecord = async (redis: IORedis, key: string, record: RollupRecord): Promise<void> => {
+  await redis.set(key, JSON.stringify(record), 'PX', ROLLUP_TTL_MS);
 };
 
 const parseAnalyticsTtlSeconds = (): number => {
@@ -242,17 +292,58 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     queue = new Queue(queueName, { connection: redis, prefix: bullmqPrefix });
 
-    await queue.add('ghl.contact.update', {
+    const contactId = coerceString(payload.id ?? payload.contactId ?? payload.contact_id);
+    const jobData: RollupJobData = {
       source: 'ghl',
       eventType,
       inboundEventId: null,
       webhookId: coerceString(payload.webhookId ?? payload.webhook_id),
       locationId,
       appId,
-      contactId: coerceString(payload.id ?? payload.contactId ?? payload.contact_id),
+      contactId,
       payloadHash: hashPayload(rawBody as Buffer),
       payload
-    });
+    };
+
+    if (CONTACT_EVENT_TYPES.has(eventType)) {
+      const rollupKey = buildRollupKey(appId, locationId, contactId);
+      if (rollupKey) {
+        const existing = parseRollupRecord(await redis.get(rollupKey));
+        const jobId = `${rollupKey}:${Date.now()}`;
+
+        if (existing?.jobId) {
+          try {
+            const existingJob = await queue.getJob(existing.jobId);
+            if (existingJob) {
+              await existingJob.remove();
+            }
+          } catch (error) {
+            console.warn('[ghl-webhook] failed to remove existing rollup job', {
+              rollupKey,
+              jobId: existing.jobId,
+              error
+            });
+          }
+        }
+
+        jobData.rollupKey = rollupKey;
+        jobData.rollupJobId = jobId;
+        await writeRollupRecord(redis, rollupKey, {
+          jobId,
+          updatedAt: Date.now(),
+          data: jobData
+        });
+
+        await queue.add('ghl.contact.update', jobData, {
+          jobId,
+          delay: ROLLUP_DELAY_MS
+        });
+      } else {
+        await queue.add('ghl.contact.update', jobData);
+      }
+    } else {
+      await queue.add('ghl.contact.update', jobData);
+    }
 
     await incrementAnalytics(redis, 'allowed', locationId, eventType);
 
