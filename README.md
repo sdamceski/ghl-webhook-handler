@@ -30,3 +30,4 @@ The staging Lambda uses the following VPC settings (also stored in `samconfig.to
 - The allowlist is stored as Redis sets. The Lambda uses `SISMEMBER` on `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with the `locationId`.
 - The queue name should match the worker's BullMQ queue.
 - Analytics counters are stored in hourly Redis hashes under `ghl:analytics:hour:YYYYMMDDHH` with `location:<locationId>:event:<eventType>:allowed|blocked` fields.
+- If `git push` fails with a permissions error in Codespaces, retry with `env -u GITHUB_TOKEN git -C /workspaces/ghl-webhook-handler push origin <branch>`.
