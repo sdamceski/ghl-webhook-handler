@@ -173,6 +173,11 @@ const writeRollupRecord = async (redis: IORedis, key: string, record: RollupReco
   await redis.set(key, JSON.stringify(record), 'PX', ROLLUP_TTL_MS);
 };
 
+const buildRollupJobId = (rollupKey: string): string => {
+  const digest = crypto.createHash('sha256').update(rollupKey).digest('hex').slice(0, 16);
+  return `ghl_contact_rollup_${digest}_${Date.now()}`;
+};
+
 const parseAnalyticsTtlSeconds = (): number => {
   const raw = process.env.GHL_WEBHOOK_ANALYTICS_TTL_SECONDS;
   if (!raw) return DEFAULT_ANALYTICS_TTL_SECONDS;
@@ -309,7 +314,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const rollupKey = buildRollupKey(appId, locationId, contactId);
       if (rollupKey) {
         const existing = parseRollupRecord(await redis.get(rollupKey));
-        const jobId = `${rollupKey}:${Date.now()}`;
+        const jobId = buildRollupJobId(rollupKey);
 
         if (existing?.jobId) {
           try {
