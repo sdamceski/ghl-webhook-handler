@@ -9,5 +9,17 @@ capabilities = "CAPABILITY_IAM"
 parameter_overrides = "DeployEnvironment=\"staging\" FunctionName=\"ghl-webhook-events-staging\" VpcSubnetIds=\"subnet-0c3eb48074c9eb460,subnet-01f346da002897e45\" VpcSecurityGroupIds=\"sg-0fd9f6b3c0ded8db2\" SecretsManagerArn=\"arn:aws:secretsmanager:us-east-2:214046906223:secret:staging-secrets-PT0K6h\" RedisSecretKey=\"REDIS_URL\" AllowlistKey=\"ghl:webhook:allowlist\" QueueName=\"ghl-inbound-contact-update\" PublicKeySecretKey=\"GHL_WEBHOOK_PUBLIC_KEY\""
 image_repositories = []
 
+[staging.deploy.parameters]
+stack_name = "ghl-webhook-events-staging"
+resolve_s3 = true
+s3_prefix = "ghl-webhook-events-staging"
+region = "us-east-2"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "DeployEnvironment=\"staging\" FunctionName=\"ghl-webhook-events-staging\" VpcSubnetIds=\"subnet-0c3eb48074c9eb460,subnet-01f346da002897e45\" VpcSecurityGroupIds=\"sg-0fd9f6b3c0ded8db2\" SecretsManagerArn=\"arn:aws:secretsmanager:us-east-2:214046906223:secret:staging-secrets-PT0K6h\" RedisSecretKey=\"REDIS_URL\" AllowlistKey=\"ghl:webhook:allowlist\" QueueName=\"ghl-inbound-contact-update\" PublicKeySecretKey=\"GHL_WEBHOOK_PUBLIC_KEY\""
+image_repositories = []
+
 [default.global.parameters]
+region = "us-east-2"
+
+[staging.global.parameters]
 region = "us-east-2"
