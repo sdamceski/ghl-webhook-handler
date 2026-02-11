@@ -85,6 +85,9 @@ const normalizeEventType = (value: string | null): string | null => {
   if (normalized === 'contactupdate' || normalized === 'contactupdated') {
     return 'ContactUpdate';
   }
+  if (normalized === 'contactdelete' || normalized === 'contactdeleted') {
+    return 'ContactDelete';
+  }
   return value;
 };
 
