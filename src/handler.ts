@@ -170,7 +170,7 @@ const enqueueDebouncedJob = async (params: {
   if (existing) {
     const state = await existing.getState();
     if (state === 'delayed' || state === 'waiting') {
-      await existing.update(data);
+      await existing.updateData(data);
       await existing.changeDelay(delayMs);
       return;
     }
