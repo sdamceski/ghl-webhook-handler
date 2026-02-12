@@ -10,6 +10,8 @@ Minimal AWS Lambda that verifies GHL webhook signatures, checks a Redis allowlis
 - `GHL_WEBHOOK_QUEUE_NAME` (optional, default: `ghl-inbound-contact-update`)
 - `GHL_WEBHOOK_JOB_NAME` (optional, default: `ghl.contact.update`)
 - `GHL_WEBHOOK_CONTACT_DEBOUNCE_MS` (optional, default: `3500`)
+- `GHL_WEBHOOK_JOB_ATTEMPTS` (optional, default: `5`)
+- `GHL_WEBHOOK_JOB_BACKOFF_MS` (optional, default: `1000`)
 - `GHL_WEBHOOK_ANALYTICS_TTL_SECONDS` (optional, default: `86400`)
 - `GHL_WEBHOOK_ANALYTICS_BUCKET_MINUTES` (optional, default: `360`)
 

@@ -18,6 +18,20 @@ type EnvConfig = {
   jobName: string;
   publicKey: string;
   debounceMs: number;
+  jobAttempts: number;
+  jobBackoffMs: number;
+};
+
+type AddJobOptions = NonNullable<Parameters<Queue['add']>[2]>;
+
+const parsePositiveIntEnv = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${name}; expected a positive integer`);
+  }
+  return parsed;
 };
 
 type AnalyticsStatus = 'allowed' | 'blocked';
@@ -48,7 +62,9 @@ const getEnvConfig = (): EnvConfig => {
     allowlistKey: process.env.GHL_WEBHOOK_ALLOWLIST_KEY ?? 'ghl:webhook:allowlist',
     queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update',
     jobName: process.env.GHL_WEBHOOK_JOB_NAME ?? 'ghl.contact.update',
-    debounceMs
+    debounceMs,
+    jobAttempts: parsePositiveIntEnv('GHL_WEBHOOK_JOB_ATTEMPTS', 5),
+    jobBackoffMs: parsePositiveIntEnv('GHL_WEBHOOK_JOB_BACKOFF_MS', 1000)
   };
 };
 
@@ -147,8 +163,9 @@ const enqueueDebouncedJob = async (params: {
   jobId: string;
   data: Record<string, unknown>;
   delayMs: number;
+  addOptions?: Partial<AddJobOptions>;
 }): Promise<void> => {
-  const { queue, jobName, jobId, data, delayMs } = params;
+  const { queue, jobName, jobId, data, delayMs, addOptions } = params;
   const existing = await queue.getJob(jobId);
   if (existing) {
     const state = await existing.getState();
@@ -167,10 +184,11 @@ const enqueueDebouncedJob = async (params: {
   }
 
   await queue.add(jobName, data, {
+    ...(addOptions ?? {}),
     jobId,
     delay: delayMs,
-    removeOnComplete: true,
-    removeOnFail: true
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 1000 }
   });
 };
 
@@ -237,7 +255,8 @@ const isAllowedLocation = async (
 };
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const { redisUrl, allowlistKey, queueName, jobName, publicKey, debounceMs } = getEnvConfig();
+  const { redisUrl, allowlistKey, queueName, jobName, publicKey, debounceMs, jobAttempts, jobBackoffMs } =
+    getEnvConfig();
 
   console.log('[ghl-webhook] request received', {
     requestId: event.requestContext?.requestId,
@@ -331,7 +350,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       jobName,
       jobId,
       data: jobPayload,
-      delayMs: debounceMs
+      delayMs: debounceMs,
+      addOptions: {
+        attempts: jobAttempts,
+        backoff: { type: 'exponential', delay: jobBackoffMs }
+      }
     });
 
     await incrementAnalytics(redis, 'allowed', locationId, eventType);
