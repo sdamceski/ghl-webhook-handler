@@ -436,7 +436,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
             rollupKey,
             jobId: existing.jobId,
             error
-        await queue.add('ghl.contact.update', jobData);
+          });
+        }
+      }
 
       const nowIso = new Date().toISOString();
       const previousCount = Number(existing?.data?.rollupCount);
@@ -451,8 +453,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         rollupKey,
         rollupJobId
       };
-
-      const rolledUp: RollupJobData = { ...baseJobData, rollupKey, rollupJobId };
       await writeRollupRecord(redis, rollupKey, {
         jobId: rollupJobId,
         updatedAt: Date.now(),
