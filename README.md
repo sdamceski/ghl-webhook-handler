@@ -8,6 +8,10 @@ Minimal AWS Lambda that verifies GHL webhook signatures, checks a Redis allowlis
 - `GHL_WEBHOOK_PUBLIC_KEY` (required, PEM)
 - `GHL_WEBHOOK_ALLOWLIST_KEY` (optional, default: `ghl:webhook:allowlist`)
 - `GHL_WEBHOOK_QUEUE_NAME` (optional, default: `ghl-inbound-contact-update`)
+- `GHL_WEBHOOK_JOB_NAME` (optional, default: `ghl.contact.update`)
+- `GHL_WEBHOOK_CONTACT_DEBOUNCE_MS` (optional, default: `3500`)
+- `GHL_WEBHOOK_JOB_ATTEMPTS` (optional, default: `5`)
+- `GHL_WEBHOOK_JOB_BACKOFF_MS` (optional, default: `1000`)
 - `GHL_WEBHOOK_ANALYTICS_TTL_SECONDS` (optional, default: `86400`)
 - `GHL_WEBHOOK_ANALYTICS_BUCKET_MINUTES` (optional, default: `360`)
 
@@ -41,6 +45,6 @@ sam deploy --config-env production
 ## Notes
 
 - The allowlist is stored as Redis sets. The Lambda uses `SISMEMBER` on `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with the `locationId`.
-- The queue name should match the worker's BullMQ queue.
+- The queue name should match the worker's BullMQ queue. Jobs are debounced by job id and removed on completion or failure.
 - Analytics counters are stored in hourly Redis hashes under `ghl:analytics:hour:YYYYMMDDHH` with `location:<locationId>:event:<eventType>:allowed|blocked` fields.
 - If `git push` fails with a permissions error in Codespaces, retry with `env -u GITHUB_TOKEN git -C /workspaces/ghl-webhook-handler push origin <branch>`.
