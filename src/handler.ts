@@ -37,6 +37,9 @@ type RollupJobData = {
   contactId: string | null;
   payloadHash: string;
   payload: Record<string, unknown>;
+  rollupCount?: number;
+  rollupFirstSeenAt?: string | null;
+  rollupLastSeenAt?: string | null;
   rollupKey?: string;
   rollupJobId?: string;
 };
@@ -52,7 +55,7 @@ const DEFAULT_ANALYTICS_TTL_SECONDS = 24 * 60 * 60;
 const DEFAULT_ANALYTICS_BUCKET_MINUTES = 360;
 const DEFAULT_BULLMQ_PREFIX = '{starauto-bull}';
 const ROLLUP_TTL_MS = 60_000;
-const CONTACT_EVENT_TYPES = new Set(['ContactCreate', 'ContactUpdate', 'ContactTagUpdate']);
+const CONTACT_EVENT_TYPES = new Set(['ContactCreate', 'ContactUpdate', 'ContactTagUpdate', 'ContactDelete']);
 const CONTACT_ROLLUP_PREFIX = 'ghl:contact-rollup';
 
 const isRecord = (value: unknown): value is WebhookEnvelope =>
@@ -433,9 +436,21 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
             rollupKey,
             jobId: existing.jobId,
             error
-          });
-        }
-      }
+        await queue.add('ghl.contact.update', jobData);
+
+      const nowIso = new Date().toISOString();
+      const previousCount = Number(existing?.data?.rollupCount);
+      const nextCount = Number.isFinite(previousCount) && previousCount > 0 ? Math.trunc(previousCount) + 1 : 1;
+      const firstSeenAt = existing?.data?.rollupFirstSeenAt ?? nowIso;
+
+      const rolledUp: RollupJobData = {
+        ...baseJobData,
+        rollupCount: nextCount,
+        rollupFirstSeenAt: firstSeenAt,
+        rollupLastSeenAt: nowIso,
+        rollupKey,
+        rollupJobId
+      };
 
       const rolledUp: RollupJobData = { ...baseJobData, rollupKey, rollupJobId };
       await writeRollupRecord(redis, rollupKey, {
@@ -455,7 +470,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         queue,
         jobName,
         jobId,
-        data: baseJobData,
+        data: {
+          ...baseJobData,
+          rollupCount: 1,
+          rollupFirstSeenAt: null,
+          rollupLastSeenAt: null
+        },
         delayMs: debounceMs,
         addOptions: {
           attempts: jobAttempts,
