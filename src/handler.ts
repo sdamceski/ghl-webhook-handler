@@ -14,6 +14,9 @@ type WebhookIds = {
 type EnvConfig = {
   redisUrl: string;
   allowlistKey: string;
+  authSnapshotKey: string;
+  authUnknownLockKey: string;
+  authUnknownLockTtlSeconds: number;
   queueName: string;
   jobName: string;
   publicKey: string;
@@ -26,6 +29,8 @@ type EnvConfig = {
 type AddJobOptions = NonNullable<Parameters<Queue['add']>[2]>;
 
 type AnalyticsStatus = 'allowed' | 'blocked';
+
+type AuthState = 'allowed' | 'denied' | 'unknown';
 
 type RollupJobData = {
   source: 'ghl';
@@ -42,6 +47,8 @@ type RollupJobData = {
   rollupLastSeenAt?: string | null;
   rollupKey?: string;
   rollupJobId?: string;
+  authState?: AuthState;
+  authValidated?: boolean;
 };
 
 type RollupRecord = {
@@ -57,6 +64,8 @@ const DEFAULT_BULLMQ_PREFIX = '{starauto-bull}';
 const ROLLUP_TTL_MS = 60_000;
 const CONTACT_EVENT_TYPES = new Set(['ContactCreate', 'ContactUpdate', 'ContactTagUpdate', 'ContactDelete']);
 const CONTACT_ROLLUP_PREFIX = 'ghl:contact-rollup';
+const DEFAULT_AUTH_SNAPSHOT_KEY = 'ghl:webhook:auth:v1';
+const DEFAULT_AUTH_UNKNOWN_LOCK_KEY = 'ghl:webhook:auth:lock:v1';
 
 const isRecord = (value: unknown): value is WebhookEnvelope =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -179,6 +188,9 @@ const getEnvConfig = (): EnvConfig => {
     redisUrl,
     publicKey,
     allowlistKey: process.env.GHL_WEBHOOK_ALLOWLIST_KEY ?? 'ghl:webhook:allowlist',
+    authSnapshotKey: process.env.GHL_WEBHOOK_AUTH_SNAPSHOT_KEY ?? DEFAULT_AUTH_SNAPSHOT_KEY,
+    authUnknownLockKey: process.env.GHL_WEBHOOK_AUTH_UNKNOWN_LOCK_KEY ?? DEFAULT_AUTH_UNKNOWN_LOCK_KEY,
+    authUnknownLockTtlSeconds: parsePositiveIntEnv('GHL_WEBHOOK_AUTH_UNKNOWN_LOCK_TTL_SECONDS', 15),
     queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update',
     jobName: process.env.GHL_WEBHOOK_JOB_NAME ?? 'ghl.contact.update',
     bullmqPrefix: process.env.GHL_WEBHOOK_BULLMQ_PREFIX ?? DEFAULT_BULLMQ_PREFIX,
@@ -316,10 +328,87 @@ const isAllowedLocation = async (
   return isMember === 1;
 };
 
+const buildAuthSnapshotKey = (baseKey: string, appId: string, locationId: string): string =>
+  `${baseKey}:${appId}:${locationId}`;
+
+const buildAuthUnknownLockKey = (baseKey: string, appId: string, locationId: string): string =>
+  `${baseKey}:${appId}:${locationId}`;
+
+const parseAuthSnapshotState = (raw: string | null): AuthState | null => {
+  if (!raw) {
+    return null;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'allowed' || normalized === 'denied') {
+    return normalized;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { state?: unknown };
+    const state = typeof parsed?.state === 'string' ? parsed.state.trim().toLowerCase() : null;
+    if (state === 'allowed' || state === 'denied') {
+      return state;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+const resolveAuthState = async (params: {
+  redis: IORedis;
+  allowlistKey: string;
+  authSnapshotKey: string;
+  locationId: string | null;
+  appId: string | null;
+}): Promise<AuthState> => {
+  const { redis, allowlistKey, authSnapshotKey, locationId, appId } = params;
+  if (!locationId || !appId) {
+    return 'denied';
+  }
+
+  const snapshotKey = buildAuthSnapshotKey(authSnapshotKey, appId, locationId);
+  const snapshotState = parseAuthSnapshotState(await redis.get(snapshotKey));
+  if (snapshotState === 'denied') {
+    return 'denied';
+  }
+  if (snapshotState === 'allowed') {
+    return 'allowed';
+  }
+
+  const allowlisted = await isAllowedLocation(redis, allowlistKey, locationId, appId);
+  if (allowlisted) {
+    return 'allowed';
+  }
+
+  return 'unknown';
+};
+
+const tryAcquireUnknownAuthLock = async (params: {
+  redis: IORedis;
+  lockKeyBase: string;
+  lockTtlSeconds: number;
+  appId: string | null;
+  locationId: string | null;
+}): Promise<boolean> => {
+  const { redis, lockKeyBase, lockTtlSeconds, appId, locationId } = params;
+  if (!appId || !locationId) {
+    return false;
+  }
+
+  const lockKey = buildAuthUnknownLockKey(lockKeyBase, appId, locationId);
+  const result = await redis.set(lockKey, String(Date.now()), 'EX', lockTtlSeconds, 'NX');
+  return result === 'OK';
+};
+
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const {
     redisUrl,
     allowlistKey,
+    authSnapshotKey,
+    authUnknownLockKey,
+    authUnknownLockTtlSeconds,
     queueName,
     jobName,
     publicKey,
@@ -388,15 +477,45 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     console.log('[ghl-webhook] extracted ids', { locationId, appId, contactId });
 
-    const allowed = await isAllowedLocation(redis, allowlistKey, locationId, appId);
-    if (!allowed) {
-      console.log('[ghl-webhook] ignored location', { locationId, allowlistKey });
+    const authState = await resolveAuthState({
+      redis,
+      allowlistKey,
+      authSnapshotKey,
+      locationId,
+      appId
+    });
+    if (authState === 'denied') {
+      console.log('[ghl-webhook] ignored location', { locationId, appId, allowlistKey, authState });
       await incrementAnalytics(redis, 'blocked', locationId, eventType);
       return {
         statusCode: 202,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'ignored', reason: 'location_not_enabled' })
       };
+    }
+
+    if (authState === 'unknown') {
+      const lockAcquired = await tryAcquireUnknownAuthLock({
+        redis,
+        lockKeyBase: authUnknownLockKey,
+        lockTtlSeconds: authUnknownLockTtlSeconds,
+        appId,
+        locationId
+      });
+
+      if (!lockAcquired) {
+        console.log('[ghl-webhook] auth validation already in progress', {
+          locationId,
+          appId,
+          authUnknownLockKey
+        });
+        await incrementAnalytics(redis, 'blocked', locationId, eventType);
+        return {
+          statusCode: 202,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'ignored', reason: 'auth_validation_in_progress' })
+        };
+      }
     }
 
     queue = new Queue(queueName, { connection: redis, prefix: bullmqPrefix });
@@ -410,7 +529,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       appId,
       contactId,
       payloadHash: computePayloadHash(payload),
-      payload
+      payload,
+      authState,
+      authValidated: authState === 'allowed'
     };
 
     const retryOptions: Pick<AddJobOptions, 'attempts' | 'backoff' | 'removeOnComplete' | 'removeOnFail'> = {
