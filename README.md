@@ -7,9 +7,6 @@ Minimal AWS Lambda that verifies GHL webhook signatures, checks a Redis allowlis
 - `REDIS_URL` (required)
 - `GHL_WEBHOOK_PUBLIC_KEY` (required, PEM)
 - `GHL_WEBHOOK_ALLOWLIST_KEY` (optional, default: `ghl:webhook:allowlist`)
-- `GHL_WEBHOOK_AUTH_SNAPSHOT_KEY` (optional, default: `ghl:webhook:auth:v1`)
-- `GHL_WEBHOOK_AUTH_UNKNOWN_LOCK_KEY` (optional, default: `ghl:webhook:auth:lock:v1`)
-- `GHL_WEBHOOK_AUTH_UNKNOWN_LOCK_TTL_SECONDS` (optional, default: `15`)
 - `GHL_WEBHOOK_QUEUE_NAME` (optional, default: `ghl-inbound-contact-update`)
 - `GHL_WEBHOOK_JOB_NAME` (optional, default: `ghl.contact.update`)
 - `GHL_WEBHOOK_CONTACT_DEBOUNCE_MS` (optional, default: `3500`)
@@ -47,12 +44,10 @@ sam deploy --config-env production
 
 ## Notes
 
-- Allow decisions are tri-state:
-	- `denied` from auth snapshot key `${GHL_WEBHOOK_AUTH_SNAPSHOT_KEY}:<appId>:<locationId>` blocks immediately.
-	- `allowed` from auth snapshot or allowlist set membership is accepted.
-	- `unknown` (no snapshot and no allowlist hit) is queued with auth metadata for downstream validation.
-- The allowlist is stored as Redis sets. The Lambda uses `SISMEMBER` on `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with the `locationId` as a fallback/source of truth for allowed state.
-- Unknown auth path uses single-flight lock `${GHL_WEBHOOK_AUTH_UNKNOWN_LOCK_KEY}:<appId>:<locationId>` so only one request proceeds while validation is pending.
+- Auth decisions are strict and fail-closed:
+	- Lambda only queues when `SISMEMBER ${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId> <locationId>` returns true.
+	- Any missing/non-allowlisted `(appId, locationId)` pair is returned as `ignored/location_not_enabled`.
+- The allowlist is stored as Redis sets under `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with `locationId` members.
 - The queue name should match the worker's BullMQ queue. Jobs are debounced by job id and removed on completion or failure.
 - Contact events include rollup metadata (`rollupCount`, `rollupFirstSeenAt`, `rollupLastSeenAt`) so workers can persist one inbox row per coalesced burst.
 - Analytics counters are stored in hourly Redis hashes under `ghl:analytics:hour:YYYYMMDDHH` with `location:<locationId>:event:<eventType>:allowed|blocked` fields.
