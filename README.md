@@ -22,8 +22,33 @@ sam build
 sam deploy --guided
 ```
 
+### Staging VPC defaults
+
+The staging Lambda uses the following VPC settings (also stored in `samconfig.toml`):
+
+- Subnets: `subnet-0c3eb48074c9eb460`, `subnet-01f346da002897e45`
+- Security group: `sg-0fd9f6b3c0ded8db2`
+
+### Production deployment
+
+- Uses the same private subnets as staging (`subnet-0c3eb48074c9eb460`, `subnet-01f346da002897e45`).
+- Attaches to the production ECS security group `sg-08b80a28bdddf7270` so the Lambda can reach the production Redis cluster (`sg-0d8764f140bca583e` allows that SG).
+- Secrets source: `arn:aws:secretsmanager:us-east-2:214046906223:secret:starauto-production-secrets-TjSyhm` (must expose `REDIS_URL` and `GHL_WEBHOOK_PUBLIC_KEY`).
+
+Deploy with:
+
+```bash
+sam build
+sam deploy --config-env production
+```
+
 ## Notes
 
-- The allowlist is stored as Redis sets. The Lambda uses `SISMEMBER` on `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with the `locationId`.
+- Auth decisions are strict and fail-closed:
+	- Lambda only queues when `SISMEMBER ${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId> <locationId>` returns true.
+	- Any missing/non-allowlisted `(appId, locationId)` pair is returned as `ignored/location_not_enabled`.
+- The allowlist is stored as Redis sets under `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with `locationId` members.
 - The queue name should match the worker's BullMQ queue. Jobs are debounced by job id and removed on completion or failure.
+- Contact events include rollup metadata (`rollupCount`, `rollupFirstSeenAt`, `rollupLastSeenAt`) so workers can persist one inbox row per coalesced burst.
 - Analytics counters are stored in hourly Redis hashes under `ghl:analytics:hour:YYYYMMDDHH` with `location:<locationId>:event:<eventType>:allowed|blocked` fields.
+- If `git push` fails with a permissions error in Codespaces, retry with `env -u GITHUB_TOKEN git -C /workspaces/ghl-webhook-handler push origin <branch>`.

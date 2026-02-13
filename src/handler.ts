@@ -17,12 +17,56 @@ type EnvConfig = {
   queueName: string;
   jobName: string;
   publicKey: string;
+  bullmqPrefix: string;
   debounceMs: number;
   jobAttempts: number;
   jobBackoffMs: number;
 };
 
 type AddJobOptions = NonNullable<Parameters<Queue['add']>[2]>;
+
+type AnalyticsStatus = 'allowed' | 'blocked';
+
+type RollupJobData = {
+  source: 'ghl';
+  eventType: string;
+  inboundEventId: number | null;
+  webhookId: string | null;
+  locationId: string | null;
+  appId: string | null;
+  contactId: string | null;
+  payloadHash: string;
+  payload: Record<string, unknown>;
+  rollupCount?: number;
+  rollupFirstSeenAt?: string | null;
+  rollupLastSeenAt?: string | null;
+  rollupKey?: string;
+  rollupJobId?: string;
+  authState?: 'allowed';
+  authValidated?: boolean;
+};
+
+type RollupRecord = {
+  jobId: string;
+  updatedAt: number;
+  data: RollupJobData;
+};
+
+const ANALYTICS_KEY_PREFIX = 'ghl:analytics:hour';
+const DEFAULT_ANALYTICS_TTL_SECONDS = 24 * 60 * 60;
+const DEFAULT_ANALYTICS_BUCKET_MINUTES = 360;
+const DEFAULT_BULLMQ_PREFIX = '{starauto-bull}';
+const ROLLUP_TTL_MS = 60_000;
+const CONTACT_EVENT_TYPES = new Set(['ContactCreate', 'ContactUpdate', 'ContactTagUpdate', 'ContactDelete']);
+const CONTACT_ROLLUP_PREFIX = 'ghl:contact-rollup';
+const isRecord = (value: unknown): value is WebhookEnvelope =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const coerceString = (value: unknown): string | null => {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text.length ? text : null;
+};
 
 const parsePositiveIntEnv = (name: string, fallback: number): number => {
   const raw = process.env[name];
@@ -34,55 +78,15 @@ const parsePositiveIntEnv = (name: string, fallback: number): number => {
   return parsed;
 };
 
-type AnalyticsStatus = 'allowed' | 'blocked';
-
-const ANALYTICS_KEY_PREFIX = 'ghl:analytics:hour';
-const DEFAULT_ANALYTICS_TTL_SECONDS = 24 * 60 * 60;
-const DEFAULT_ANALYTICS_BUCKET_MINUTES = 360;
-const CONTACT_EVENT_TYPES = new Set(['ContactCreate', 'ContactUpdate', 'ContactTagUpdate']);
-
-const getEnvConfig = (): EnvConfig => {
-  const redisUrl = process.env.REDIS_URL;
-  if (!redisUrl) {
-    throw new Error('Missing REDIS_URL');
-  }
-
-  const publicKey = process.env.GHL_WEBHOOK_PUBLIC_KEY;
-  if (!publicKey) {
-    throw new Error('Missing GHL_WEBHOOK_PUBLIC_KEY');
-  }
-
-  const debounceRaw = process.env.GHL_WEBHOOK_CONTACT_DEBOUNCE_MS;
-  const parsedDebounce = debounceRaw ? Number(debounceRaw) : Number.NaN;
-  const debounceMs = Number.isFinite(parsedDebounce) && parsedDebounce > 0 ? parsedDebounce : 3500;
-
-  return {
-    redisUrl,
-    publicKey,
-    allowlistKey: process.env.GHL_WEBHOOK_ALLOWLIST_KEY ?? 'ghl:webhook:allowlist',
-    queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update',
-    jobName: process.env.GHL_WEBHOOK_JOB_NAME ?? 'ghl.contact.update',
-    debounceMs,
-    jobAttempts: parsePositiveIntEnv('GHL_WEBHOOK_JOB_ATTEMPTS', 5),
-    jobBackoffMs: parsePositiveIntEnv('GHL_WEBHOOK_JOB_BACKOFF_MS', 1000)
-  };
-};
-
-const isRecord = (value: unknown): value is WebhookEnvelope =>
-  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-
-const coerceString = (value: unknown): string | null => {
-  if (value === undefined || value === null) return null;
-  const text = String(value).trim();
-  return text.length ? text : null;
-};
-
 const normalizeEventType = (value: string | null): string | null => {
   if (!value) return value;
   if (value === 'ContactUpdate') return value;
   const normalized = value.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
   if (normalized === 'contactupdate' || normalized === 'contactupdated') {
     return 'ContactUpdate';
+  }
+  if (normalized === 'contactdelete' || normalized === 'contactdeleted') {
+    return 'ContactDelete';
   }
   return value;
 };
@@ -157,6 +161,34 @@ const buildJobId = (appId: string | null, locationId: string | null, contactId: 
   return `${appSegment}:${locationSegment}:${contactId}`;
 };
 
+const getEnvConfig = (): EnvConfig => {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
+    throw new Error('Missing REDIS_URL');
+  }
+
+  const publicKey = process.env.GHL_WEBHOOK_PUBLIC_KEY;
+  if (!publicKey) {
+    throw new Error('Missing GHL_WEBHOOK_PUBLIC_KEY');
+  }
+
+  const debounceRaw = process.env.GHL_WEBHOOK_CONTACT_DEBOUNCE_MS;
+  const parsedDebounce = debounceRaw ? Number(debounceRaw) : Number.NaN;
+  const debounceMs = Number.isFinite(parsedDebounce) && parsedDebounce > 0 ? parsedDebounce : 3500;
+
+  return {
+    redisUrl,
+    publicKey,
+    allowlistKey: process.env.GHL_WEBHOOK_ALLOWLIST_KEY ?? 'ghl:webhook:allowlist',
+    queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update',
+    jobName: process.env.GHL_WEBHOOK_JOB_NAME ?? 'ghl.contact.update',
+    bullmqPrefix: process.env.GHL_WEBHOOK_BULLMQ_PREFIX ?? DEFAULT_BULLMQ_PREFIX,
+    debounceMs,
+    jobAttempts: parsePositiveIntEnv('GHL_WEBHOOK_JOB_ATTEMPTS', 5),
+    jobBackoffMs: parsePositiveIntEnv('GHL_WEBHOOK_JOB_BACKOFF_MS', 1000)
+  };
+};
+
 const enqueueDebouncedJob = async (params: {
   queue: Queue;
   jobName: string;
@@ -190,6 +222,37 @@ const enqueueDebouncedJob = async (params: {
     removeOnComplete: { count: 100 },
     removeOnFail: { count: 1000 }
   });
+};
+
+const buildRollupKey = (appId: string | null, locationId: string | null, contactId: string | null): string | null => {
+  if (!appId || !locationId || !contactId) {
+    return null;
+  }
+  return `${CONTACT_ROLLUP_PREFIX}:${appId}:${locationId}:${contactId}`;
+};
+
+const parseRollupRecord = (raw: string | null): RollupRecord | null => {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as RollupRecord;
+    if (!parsed || typeof parsed.jobId !== 'string' || !parsed.data) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const writeRollupRecord = async (redis: IORedis, key: string, record: RollupRecord): Promise<void> => {
+  await redis.set(key, JSON.stringify(record), 'PX', ROLLUP_TTL_MS);
+};
+
+const buildRollupJobId = (rollupKey: string): string => {
+  const digest = crypto.createHash('sha256').update(rollupKey).digest('hex').slice(0, 16);
+  return `ghl_contact_rollup_${digest}_${Date.now()}`;
 };
 
 const parseAnalyticsTtlSeconds = (): number => {
@@ -255,8 +318,17 @@ const isAllowedLocation = async (
 };
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const { redisUrl, allowlistKey, queueName, jobName, publicKey, debounceMs, jobAttempts, jobBackoffMs } =
-    getEnvConfig();
+  const {
+    redisUrl,
+    allowlistKey,
+    queueName,
+    jobName,
+    publicKey,
+    bullmqPrefix,
+    debounceMs,
+    jobAttempts,
+    jobBackoffMs
+  } = getEnvConfig();
 
   console.log('[ghl-webhook] request received', {
     requestId: event.requestContext?.requestId,
@@ -264,9 +336,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     isBase64Encoded: event.isBase64Encoded
   });
 
-  const rawBody = event.body
-    ? Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8')
-    : null;
+  const rawBody = event.body ? Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8') : null;
   const payload = parseBody(rawBody ? rawBody.toString('utf8') : null);
   const rawEventType = payload ? coerceString(payload.type) ?? 'unknown' : 'unknown';
   const eventType = normalizeEventType(rawEventType) ?? rawEventType;
@@ -319,9 +389,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     console.log('[ghl-webhook] extracted ids', { locationId, appId, contactId });
 
-    const allowed = await isAllowedLocation(redis, allowlistKey, locationId, appId);
-    if (!allowed) {
-      console.log('[ghl-webhook] ignored location', { locationId, allowlistKey });
+    const allowlisted = await isAllowedLocation(redis, allowlistKey, locationId, appId);
+    if (!allowlisted) {
+      console.log('[ghl-webhook] ignored location', { locationId, appId, allowlistKey });
       await incrementAnalytics(redis, 'blocked', locationId, eventType);
       return {
         statusCode: 202,
@@ -330,10 +400,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
-    queue = new Queue(queueName, { connection: redis });
+    queue = new Queue(queueName, { connection: redis, prefix: bullmqPrefix });
 
-    const jobId = buildJobId(appId, locationId, contactId);
-    const jobPayload = {
+    const baseJobData: RollupJobData = {
       source: 'ghl',
       eventType,
       inboundEventId: null,
@@ -342,20 +411,81 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       appId,
       contactId,
       payloadHash: computePayloadHash(payload),
-      payload
+      payload,
+      authState: 'allowed',
+      authValidated: true
     };
 
-    await enqueueDebouncedJob({
-      queue,
-      jobName,
-      jobId,
-      data: jobPayload,
-      delayMs: debounceMs,
-      addOptions: {
-        attempts: jobAttempts,
-        backoff: { type: 'exponential', delay: jobBackoffMs }
+    const retryOptions: Pick<AddJobOptions, 'attempts' | 'backoff' | 'removeOnComplete' | 'removeOnFail'> = {
+      attempts: jobAttempts,
+      backoff: { type: 'exponential', delay: jobBackoffMs },
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 1000 }
+    };
+
+    const rollupKey = buildRollupKey(appId, locationId, contactId);
+    if (rollupKey) {
+      const existing = parseRollupRecord(await redis.get(rollupKey));
+      const rollupJobId = buildRollupJobId(rollupKey);
+
+      if (existing?.jobId) {
+        try {
+          const existingJob = await queue.getJob(existing.jobId);
+          if (existingJob) {
+            await existingJob.remove();
+          }
+        } catch (error) {
+          console.warn('[ghl-webhook] failed to remove existing rollup job', {
+            rollupKey,
+            jobId: existing.jobId,
+            error
+          });
+        }
       }
-    });
+
+      const nowIso = new Date().toISOString();
+      const previousCount = Number(existing?.data?.rollupCount);
+      const nextCount = Number.isFinite(previousCount) && previousCount > 0 ? Math.trunc(previousCount) + 1 : 1;
+      const firstSeenAt = existing?.data?.rollupFirstSeenAt ?? nowIso;
+
+      const rolledUp: RollupJobData = {
+        ...baseJobData,
+        rollupCount: nextCount,
+        rollupFirstSeenAt: firstSeenAt,
+        rollupLastSeenAt: nowIso,
+        rollupKey,
+        rollupJobId
+      };
+      await writeRollupRecord(redis, rollupKey, {
+        jobId: rollupJobId,
+        updatedAt: Date.now(),
+        data: rolledUp
+      });
+
+      await queue.add(jobName, rolledUp, {
+        ...retryOptions,
+        jobId: rollupJobId,
+        delay: debounceMs
+      });
+    } else {
+      const jobId = buildJobId(appId, locationId, contactId);
+      await enqueueDebouncedJob({
+        queue,
+        jobName,
+        jobId,
+        data: {
+          ...baseJobData,
+          rollupCount: 1,
+          rollupFirstSeenAt: null,
+          rollupLastSeenAt: null
+        },
+        delayMs: debounceMs,
+        addOptions: {
+          attempts: jobAttempts,
+          backoff: { type: 'exponential', delay: jobBackoffMs }
+        }
+      });
+    }
 
     await incrementAnalytics(redis, 'allowed', locationId, eventType);
 
