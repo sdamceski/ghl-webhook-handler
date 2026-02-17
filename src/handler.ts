@@ -9,13 +9,16 @@ type WebhookIds = {
   locationId: string | null;
   appId: string | null;
   contactId: string | null;
+  opportunityId: string | null;
 };
 
 type EnvConfig = {
   redisUrl: string;
   allowlistKey: string;
-  queueName: string;
-  jobName: string;
+  contactQueueName: string;
+  contactJobName: string;
+  opportunityQueueName: string;
+  opportunityJobName: string;
   publicKey: string;
   bullmqPrefix: string;
   debounceMs: number;
@@ -58,6 +61,12 @@ const DEFAULT_ANALYTICS_BUCKET_MINUTES = 360;
 const DEFAULT_BULLMQ_PREFIX = '{starauto-bull}';
 const ROLLUP_TTL_MS = 60_000;
 const CONTACT_EVENT_TYPES = new Set(['ContactCreate', 'ContactUpdate', 'ContactTagUpdate', 'ContactDelete']);
+const OPPORTUNITY_EVENT_TYPES = new Set([
+  'OpportunityCreate',
+  'OpportunityUpdate',
+  'OpportunityDelete',
+  'OpportunityStageUpdate'
+]);
 const CONTACT_ROLLUP_PREFIX = 'ghl:contact-rollup';
 const isRecord = (value: unknown): value is WebhookEnvelope =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -88,17 +97,33 @@ const normalizeEventType = (value: string | null): string | null => {
   if (normalized === 'contactdelete' || normalized === 'contactdeleted') {
     return 'ContactDelete';
   }
+  if (normalized === 'opportunitycreate' || normalized === 'opportunitycreated') {
+    return 'OpportunityCreate';
+  }
+  if (normalized === 'opportunityupdate' || normalized === 'opportunityupdated') {
+    return 'OpportunityUpdate';
+  }
+  if (normalized === 'opportunitydelete' || normalized === 'opportunitydeleted') {
+    return 'OpportunityDelete';
+  }
+  if (normalized === 'opportunitystageupdate' || normalized === 'opportunitystageupdated') {
+    return 'OpportunityStageUpdate';
+  }
   return value;
 };
 
 const extractWebhookIds = (payload: unknown): WebhookIds => {
   if (!isRecord(payload)) {
-    return { locationId: null, appId: null, contactId: null };
+    return { locationId: null, appId: null, contactId: null, opportunityId: null };
   }
+
+  const commonId = coerceString(payload.id);
+
   return {
     locationId: coerceString(payload.locationId ?? payload.location_id ?? payload.companyId ?? payload.company_id),
     appId: coerceString(payload.appId ?? payload.app_id),
-    contactId: coerceString(payload.contactId ?? payload.contact_id ?? payload.id)
+    contactId: coerceString(payload.contactId ?? payload.contact_id ?? commonId),
+    opportunityId: coerceString(payload.opportunityId ?? payload.opportunity_id ?? commonId)
   };
 };
 
@@ -155,10 +180,10 @@ const parseBody = (body: string | null | undefined): WebhookEnvelope | null => {
 const computePayloadHash = (payload: Record<string, unknown>): string =>
   crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 
-const buildJobId = (appId: string | null, locationId: string | null, contactId: string): string => {
+const buildJobId = (appId: string | null, locationId: string | null, entityId: string): string => {
   const appSegment = appId ? appId.trim() : 'noapp';
   const locationSegment = locationId ? locationId.trim() : 'noloc';
-  return `${appSegment}:${locationSegment}:${contactId}`;
+  return `${appSegment}:${locationSegment}:${entityId}`;
 };
 
 const getEnvConfig = (): EnvConfig => {
@@ -180,8 +205,14 @@ const getEnvConfig = (): EnvConfig => {
     redisUrl,
     publicKey,
     allowlistKey: process.env.GHL_WEBHOOK_ALLOWLIST_KEY ?? 'ghl:webhook:allowlist',
-    queueName: process.env.GHL_WEBHOOK_QUEUE_NAME ?? 'ghl-inbound-contact-update',
-    jobName: process.env.GHL_WEBHOOK_JOB_NAME ?? 'ghl.contact.update',
+    contactQueueName: process.env.GHL_WEBHOOK_CONTACT_QUEUE_NAME
+      ?? process.env.GHL_WEBHOOK_QUEUE_NAME
+      ?? 'ghl-inbound-contact-update',
+    contactJobName: process.env.GHL_WEBHOOK_CONTACT_JOB_NAME
+      ?? process.env.GHL_WEBHOOK_JOB_NAME
+      ?? 'ghl.contact.update',
+    opportunityQueueName: process.env.GHL_WEBHOOK_OPPORTUNITY_QUEUE_NAME ?? 'ghl-opportunity-sync',
+    opportunityJobName: process.env.GHL_WEBHOOK_OPPORTUNITY_JOB_NAME ?? 'ghl.opportunity.sync',
     bullmqPrefix: process.env.GHL_WEBHOOK_BULLMQ_PREFIX ?? DEFAULT_BULLMQ_PREFIX,
     debounceMs,
     jobAttempts: parsePositiveIntEnv('GHL_WEBHOOK_JOB_ATTEMPTS', 5),
@@ -321,8 +352,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const {
     redisUrl,
     allowlistKey,
-    queueName,
-    jobName,
+    contactQueueName,
+    contactJobName,
+    opportunityQueueName,
+    opportunityJobName,
     publicKey,
     bullmqPrefix,
     debounceMs,
@@ -340,7 +373,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const payload = parseBody(rawBody ? rawBody.toString('utf8') : null);
   const rawEventType = payload ? coerceString(payload.type) ?? 'unknown' : 'unknown';
   const eventType = normalizeEventType(rawEventType) ?? rawEventType;
-  const { locationId, appId, contactId } = extractWebhookIds(payload);
+  const { locationId, appId, contactId, opportunityId } = extractWebhookIds(payload);
 
   const redis = new IORedis(redisUrl);
   let queue: Queue | null = null;
@@ -367,7 +400,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
-    if (!CONTACT_EVENT_TYPES.has(eventType)) {
+    const isContactEvent = CONTACT_EVENT_TYPES.has(eventType);
+    const isOpportunityEvent = OPPORTUNITY_EVENT_TYPES.has(eventType);
+
+    if (!isContactEvent && !isOpportunityEvent) {
       console.log('[ghl-webhook] ignored unsupported event type', { eventType });
       await incrementAnalytics(redis, 'blocked', locationId, eventType);
       return {
@@ -377,7 +413,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
-    if (!contactId) {
+    if (isContactEvent && !contactId) {
       console.warn('[ghl-webhook] missing contact id');
       await incrementAnalytics(redis, 'blocked', locationId, eventType);
       return {
@@ -387,7 +423,23 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
-    console.log('[ghl-webhook] extracted ids', { locationId, appId, contactId });
+    if (isOpportunityEvent && !opportunityId) {
+      console.warn('[ghl-webhook] missing opportunity id');
+      await incrementAnalytics(redis, 'blocked', locationId, eventType);
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'error', reason: 'opportunity_id_required' })
+      };
+    }
+
+    console.log('[ghl-webhook] extracted ids', {
+      locationId,
+      appId,
+      contactId,
+      opportunityId,
+      eventType
+    });
 
     const allowlisted = await isAllowedLocation(redis, allowlistKey, locationId, appId);
     if (!allowlisted) {
@@ -400,6 +452,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
+    const queueName = isContactEvent ? contactQueueName : opportunityQueueName;
+    const jobName = isContactEvent ? contactJobName : opportunityJobName;
     queue = new Queue(queueName, { connection: redis, prefix: bullmqPrefix });
 
     const baseJobData: RollupJobData = {
@@ -423,7 +477,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       removeOnFail: { count: 1000 }
     };
 
-    const rollupKey = buildRollupKey(appId, locationId, contactId);
+    const rollupKey = isContactEvent ? buildRollupKey(appId, locationId, contactId) : null;
     if (rollupKey) {
       const existing = parseRollupRecord(await redis.get(rollupKey));
       const rollupJobId = buildRollupJobId(rollupKey);
@@ -468,17 +522,36 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         delay: debounceMs
       });
     } else {
-      const jobId = buildJobId(appId, locationId, contactId);
-      await enqueueDebouncedJob({
-        queue,
-        jobName,
-        jobId,
-        data: {
+      const jobId = buildJobId(appId, locationId, isContactEvent ? (contactId as string) : (opportunityId as string));
+      const jobData = isContactEvent
+        ? {
           ...baseJobData,
           rollupCount: 1,
           rollupFirstSeenAt: null,
           rollupLastSeenAt: null
-        },
+        }
+        : {
+          source: 'ghl',
+          eventType,
+          webhookId: extractWebhookId(payload),
+          locationId,
+          appId,
+          opportunityId,
+          payloadHash: computePayloadHash(payload),
+          payload,
+          direction: 'inbound',
+          ghlLocationId: locationId,
+          ghlOpportunityId: opportunityId,
+          reason: 'webhook',
+          authState: 'allowed',
+          authValidated: true
+        };
+
+      await enqueueDebouncedJob({
+        queue,
+        jobName,
+        jobId,
+        data: jobData,
         delayMs: debounceMs,
         addOptions: {
           attempts: jobAttempts,
@@ -489,7 +562,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     await incrementAnalytics(redis, 'allowed', locationId, eventType);
 
-    console.log('[ghl-webhook] queued payload', { locationId, appId, queueName });
+    console.log('[ghl-webhook] queued payload', {
+      locationId,
+      appId,
+      queueName,
+      eventType,
+      entityId: isContactEvent ? contactId : opportunityId
+    });
 
     return {
       statusCode: 202,
