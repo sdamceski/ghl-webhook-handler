@@ -216,11 +216,11 @@ const buildOpportunityDeleteJobId = (params: {
   webhookId: string | null;
   payloadHash: string;
 }): string => {
-  const base = buildJobId(params.appId, params.locationId, params.opportunityId);
+  const base = buildJobId(params.appId, params.locationId, params.opportunityId).replace(/:/g, '_');
   const suffix = params.webhookId
     ? params.webhookId
     : params.payloadHash.slice(0, 16);
-  return `delete:${base}:${suffix}`;
+  return `delete_${base}_${suffix}`;
 };
 
 const getEnvConfig = (): EnvConfig => {
