@@ -14,6 +14,7 @@ Minimal AWS Lambda that verifies GHL webhook signatures, checks a Redis allowlis
 - `GHL_WEBHOOK_QUEUE_NAME` (legacy fallback for contact queue)
 - `GHL_WEBHOOK_JOB_NAME` (legacy fallback for contact job)
 - `GHL_WEBHOOK_CONTACT_DEBOUNCE_MS` (optional, default: `3500`)
+- `GHL_WEBHOOK_OPPORTUNITY_DELETE_GUARD_SECONDS` (optional, default: `30`)
 - `GHL_WEBHOOK_JOB_ATTEMPTS` (optional, default: `5`)
 - `GHL_WEBHOOK_JOB_BACKOFF_MS` (optional, default: `1000`)
 - `GHL_WEBHOOK_ANALYTICS_TTL_SECONDS` (optional, default: `86400`)
@@ -54,6 +55,7 @@ sam deploy --config-env production
 - The allowlist is stored as Redis sets under `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with `locationId` members.
 - Supported inbound event types: `ContactCreate`, `ContactUpdate`, `ContactTagUpdate`, `ContactDelete`, `OpportunityCreate`, `OpportunityUpdate`, `OpportunityDelete`, `OpportunityStageUpdate`.
 - Queue names should match worker BullMQ queues (contact vs opportunity). Jobs are debounced by job id and removed on completion or failure.
+- Opportunity deletes bypass debounce and enqueue immediately. A short-lived Redis guard blocks follow-up opportunity update/stage events for the same `(appId, locationId, opportunityId)` while the delete guard is active.
 - Contact events include rollup metadata (`rollupCount`, `rollupFirstSeenAt`, `rollupLastSeenAt`) so workers can persist one inbox row per coalesced burst.
 - Analytics counters are stored in hourly Redis hashes under `ghl:analytics:hour:YYYYMMDDHH` with `location:<locationId>:event:<eventType>:allowed|blocked` fields.
 - If `git push` fails with a permissions error in Codespaces, retry with `env -u GITHUB_TOKEN git -C /workspaces/ghl-webhook-handler push origin <branch>`.
