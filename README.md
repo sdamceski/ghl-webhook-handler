@@ -47,6 +47,14 @@ sam build
 sam deploy --config-env production
 ```
 
+### Production auto-deploy from `main`
+
+This repo includes a GitHub Actions workflow at `.github/workflows/deploy-production.yml` that deploys automatically when code is pushed to `main` using the same SAM-build + Lambda code update pattern as staging.
+
+It assumes IAM role `arn:aws:iam::214046906223:role/GitHubActionsGhlWebhookProdDeploy` via GitHub OIDC.
+
+That role trusts GitHub's OIDC provider (`token.actions.githubusercontent.com`) for `sdamceski/ghl-webhook-handler` on `refs/heads/main` and has permissions for `sam build` and `aws lambda update-function-code` on `ghl-webhook-events-production`.
+
 ## Notes
 
 - Auth decisions are strict and fail-closed:
