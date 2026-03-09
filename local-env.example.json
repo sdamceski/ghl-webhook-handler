@@ -1,0 +1,11 @@
+{
+  "GhlWebhookListenerFunction": {
+    "REDIS_URL": "redis://localhost:6379",
+    "GHL_WEBHOOK_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nREPLACE_ME\n-----END PUBLIC KEY-----",
+    "GHL_WEBHOOK_ALLOWLIST_KEY": "ghl:webhook:allowlist",
+    "GHL_WEBHOOK_CONTACT_QUEUE_NAME": "ghl-inbound-contact-update",
+    "GHL_WEBHOOK_CONTACT_JOB_NAME": "ghl.contact.update",
+    "GHL_WEBHOOK_OPPORTUNITY_QUEUE_NAME": "ghl-opportunity-sync",
+    "GHL_WEBHOOK_OPPORTUNITY_JOB_NAME": "ghl.opportunity.sync"
+  }
+}

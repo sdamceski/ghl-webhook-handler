@@ -43,6 +43,12 @@ Resources:
       FunctionName: !Ref FunctionName
       Handler: handler.handler
       CodeUri: .
+      Events:
+        WebhookPost:
+          Type: HttpApi
+          Properties:
+            Path: /webhook
+            Method: POST
       Policies:
         - AWSLambdaVPCAccessExecutionRole
       VpcConfig:

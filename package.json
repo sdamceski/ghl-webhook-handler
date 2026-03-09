@@ -7,6 +7,9 @@
   "main": "dist/handler.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "sam:build": "sam build",
+    "sam:invoke": "sam local invoke GhlWebhookListenerFunction -e events/local-contact-update.json --env-vars local-env.json",
+    "sam:start-api": "sam local start-api --env-vars local-env.json --port 3000",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "echo 'No lint configured'"
   },

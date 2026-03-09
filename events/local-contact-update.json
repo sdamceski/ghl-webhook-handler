@@ -1,0 +1,15 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /webhook",
+  "rawPath": "/webhook",
+  "rawQueryString": "",
+  "headers": {
+    "content-type": "application/json",
+    "x-wh-signature": "REPLACE_WITH_REAL_OR_REPLAYED_SIGNATURE"
+  },
+  "requestContext": {
+    "requestId": "local-test-request"
+  },
+  "isBase64Encoded": false,
+  "body": "{\"type\":\"ContactUpdate\",\"locationId\":\"loc_123\",\"appId\":\"app_123\",\"contactId\":\"contact_123\"}"
+}
