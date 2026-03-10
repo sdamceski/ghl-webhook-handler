@@ -42,6 +42,23 @@ jobs:
       - name: Build with SAM
         run: sam build
 
+      - name: Cleanup failed dev stack state
+        run: |
+          STACK_NAME="ghl-webhook-events-dev"
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || true)
+
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Deleting $STACK_NAME in ROLLBACK_COMPLETE before deploy..."
+            aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "${AWS_REGION}"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "${AWS_REGION}"
+          else
+            echo "Stack status is '$STATUS'; no cleanup needed."
+          fi
+
       - name: Deploy stack (dev)
         run: |
           sam deploy \
