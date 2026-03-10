@@ -17,6 +17,7 @@ Minimal AWS Lambda that verifies GHL webhook signatures, checks a Redis allowlis
 - `GHL_WEBHOOK_OPPORTUNITY_DELETE_GUARD_SECONDS` (optional, default: `30`)
 - `GHL_WEBHOOK_JOB_ATTEMPTS` (optional, default: `5`)
 - `GHL_WEBHOOK_JOB_BACKOFF_MS` (optional, default: `1000`)
+- `GHL_WEBHOOK_WAIT_TTL_MS` (optional, default: `0`; when set > 0, removes stale `wait`/`delayed` jobs older than this TTL)
 - `GHL_WEBHOOK_ANALYTICS_TTL_SECONDS` (optional, default: `86400`)
 - `GHL_WEBHOOK_ANALYTICS_BUCKET_MINUTES` (optional, default: `360`)
 

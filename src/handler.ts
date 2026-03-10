@@ -25,6 +25,7 @@ type EnvConfig = {
   debounceMs: number;
   jobAttempts: number;
   jobBackoffMs: number;
+  waitTtlMs: number;
 };
 
 type AddJobOptions = NonNullable<Parameters<Queue['add']>[2]>;
@@ -86,6 +87,16 @@ const parsePositiveIntEnv = (name: string, fallback: number): number => {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`Invalid ${name}; expected a positive integer`);
+  }
+  return parsed;
+};
+
+const parseNonNegativeIntEnv = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid ${name}; expected a non-negative integer`);
   }
   return parsed;
 };
@@ -257,8 +268,27 @@ const getEnvConfig = (): EnvConfig => {
     bullmqPrefix: process.env.GHL_WEBHOOK_BULLMQ_PREFIX ?? DEFAULT_BULLMQ_PREFIX,
     debounceMs,
     jobAttempts: parsePositiveIntEnv('GHL_WEBHOOK_JOB_ATTEMPTS', 5),
-    jobBackoffMs: parsePositiveIntEnv('GHL_WEBHOOK_JOB_BACKOFF_MS', 1000)
+    jobBackoffMs: parsePositiveIntEnv('GHL_WEBHOOK_JOB_BACKOFF_MS', 1000),
+    waitTtlMs: parseNonNegativeIntEnv('GHL_WEBHOOK_WAIT_TTL_MS', 0)
   };
+};
+
+const cleanStaleQueuedJobs = async (queue: Queue, ttlMs: number): Promise<void> => {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+    return;
+  }
+
+  try {
+    // Drop old, unprocessed jobs to prevent dev backlog growth when workers are offline.
+    await queue.clean(ttlMs, 1000, 'wait');
+    await queue.clean(ttlMs, 1000, 'delayed');
+  } catch (error) {
+    console.warn('[ghl-webhook] failed to clean stale queue jobs', {
+      queue: queue.name,
+      ttlMs,
+      error
+    });
+  }
 };
 
 const enqueueDebouncedJob = async (params: {
@@ -402,7 +432,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     bullmqPrefix,
     debounceMs,
     jobAttempts,
-    jobBackoffMs
+    jobBackoffMs,
+    waitTtlMs
   } = getEnvConfig();
 
   console.log('[ghl-webhook] request received', {
@@ -522,6 +553,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     const queueName = isContactEvent ? contactQueueName : opportunityQueueName;
     const jobName = isContactEvent ? contactJobName : opportunityJobName;
     queue = new Queue(queueName, { connection: redis, prefix: bullmqPrefix });
+    await cleanStaleQueuedJobs(queue, waitTtlMs);
     const webhookId = extractWebhookId(payload);
     const payloadHash = computePayloadHash(payload);
 
