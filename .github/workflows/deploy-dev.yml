@@ -53,8 +53,6 @@ jobs:
               DeployEnvironment="dev" \
               FunctionName="ghl-webhook-events-dev" \
               ExecutionRoleArn="arn:aws:iam::214046906223:role/ghl-webhook-events-stagin-GhlWebhookEventsStagingFu-PrGlDdAdrA43" \
-              VpcSubnetIds="" \
-              VpcSecurityGroupIds="" \
               SecretsManagerArn="arn:aws:secretsmanager:us-east-2:214046906223:secret:starauto-dev-secrets-4dpdD4" \
               RedisSecretKey="REDIS_URL" \
               AllowlistKey="ghl:webhook:allowlist" \
