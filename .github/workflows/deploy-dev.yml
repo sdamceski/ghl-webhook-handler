@@ -66,6 +66,7 @@ jobs:
             --resolve-s3 \
             --capabilities CAPABILITY_IAM \
             --region "${AWS_REGION}" \
+            --no-fail-on-empty-changeset \
             --parameter-overrides \
               DeployEnvironment="dev" \
               FunctionName="ghl-webhook-events-dev" \
