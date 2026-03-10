@@ -9,6 +9,9 @@ Parameters:
   FunctionName:
     Type: String
     Default: ghl-webhook-events-staging
+  ExecutionRoleArn:
+    Type: String
+    Default: arn:aws:iam::214046906223:role/ghl-webhook-events-stagin-GhlWebhookEventsStagingFu-PrGlDdAdrA43
   VpcSubnetIds:
     Type: String
     Default: ""
@@ -57,8 +60,7 @@ Resources:
       FunctionName: !Ref FunctionName
       Handler: handler.handler
       CodeUri: .
-      Policies:
-        - AWSLambdaVPCAccessExecutionRole
+      Role: !Ref ExecutionRoleArn
       VpcConfig: !If
         - UseVpcConfig
         - SecurityGroupIds: !Split [",", !Ref VpcSecurityGroupIds]
