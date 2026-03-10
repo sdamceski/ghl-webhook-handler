@@ -11,8 +11,10 @@ Parameters:
     Default: ghl-webhook-events-staging
   VpcSubnetIds:
     Type: String
+    Default: ""
   VpcSecurityGroupIds:
     Type: String
+    Default: ""
   SecretsManagerArn:
     Type: String
     Default: arn:aws:secretsmanager:us-east-2:214046906223:secret:staging-secrets-PT0K6h
@@ -28,6 +30,18 @@ Parameters:
   PublicKeySecretKey:
     Type: String
     Default: GHL_WEBHOOK_PUBLIC_KEY
+  BullmqPrefix:
+    Type: String
+    Default: "{starauto-bull}"
+  WaitTtlMs:
+    Type: String
+    Default: "0"
+
+Conditions:
+  UseVpcConfig:
+    !And
+      - !Not [!Equals [!Ref VpcSubnetIds, ""]]
+      - !Not [!Equals [!Ref VpcSecurityGroupIds, ""]]
 
 Globals:
   Function:
@@ -45,15 +59,19 @@ Resources:
       CodeUri: .
       Policies:
         - AWSLambdaVPCAccessExecutionRole
-      VpcConfig:
-        SecurityGroupIds: !Split [",", !Ref VpcSecurityGroupIds]
-        SubnetIds: !Split [",", !Ref VpcSubnetIds]
+      VpcConfig: !If
+        - UseVpcConfig
+        - SecurityGroupIds: !Split [",", !Ref VpcSecurityGroupIds]
+          SubnetIds: !Split [",", !Ref VpcSubnetIds]
+        - !Ref AWS::NoValue
       Environment:
         Variables:
           REDIS_URL: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${RedisSecretKey}}}"
           GHL_WEBHOOK_ALLOWLIST_KEY: !Ref AllowlistKey
           GHL_WEBHOOK_QUEUE_NAME: !Ref QueueName
           GHL_WEBHOOK_PUBLIC_KEY: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${PublicKeySecretKey}}}"
+          GHL_WEBHOOK_BULLMQ_PREFIX: !Ref BullmqPrefix
+          GHL_WEBHOOK_WAIT_TTL_MS: !Ref WaitTtlMs
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
