@@ -11,7 +11,7 @@ jobs:
     name: Deploy Lambda via SAM (dev)
     environment:
       name: dev
-    runs-on: [self-hosted, dev]
+    runs-on: ubuntu-latest
 
     permissions:
       id-token: write
@@ -35,6 +35,11 @@ jobs:
         with:
           node-version: 20
           cache: npm
+
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
 
       - name: Install dependencies
         run: npm ci
