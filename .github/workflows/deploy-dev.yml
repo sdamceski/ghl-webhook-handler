@@ -73,7 +73,6 @@ jobs:
               ExecutionRoleArn="arn:aws:iam::214046906223:role/ghl-webhook-events-stagin-GhlWebhookEventsStagingFu-PrGlDdAdrA43" \
               SecretsManagerArn="arn:aws:secretsmanager:us-east-2:214046906223:secret:starauto-dev-secrets-4dpdD4" \
               RedisSecretKey="REDIS_URL" \
-              AllowlistKey="ghl:webhook:allowlist" \
               QueueName="ghl-inbound-contact-update" \
               PublicKeySecretKey="GHL_WEBHOOK_PUBLIC_KEY" \
               BullmqPrefix="{starauto-bull}" \

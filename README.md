@@ -1,12 +1,11 @@
 # StarAuto GHL Webhook Listener
 
-Minimal AWS Lambda that verifies GHL webhook signatures, checks a Redis allowlist, and enqueues the payload for a worker.
+Minimal AWS Lambda that verifies GHL webhook signatures and enqueues the payload for a worker.
 
 ## Environment variables
 
 - `REDIS_URL` (required)
 - `GHL_WEBHOOK_PUBLIC_KEY` (required, PEM)
-- `GHL_WEBHOOK_ALLOWLIST_KEY` (optional, default: `ghl:webhook:allowlist`)
 - `GHL_WEBHOOK_CONTACT_QUEUE_NAME` (optional, default: `ghl-inbound-contact-update`)
 - `GHL_WEBHOOK_CONTACT_JOB_NAME` (optional, default: `ghl.contact.update`)
 - `GHL_WEBHOOK_OPPORTUNITY_QUEUE_NAME` (optional, default: `ghl-opportunity-sync`)
@@ -59,10 +58,9 @@ That role trusts GitHub's OIDC provider (`token.actions.githubusercontent.com`) 
 ## Notes
 
 - Auth decisions are strict and fail-closed:
-	- Lambda only queues when `SISMEMBER ${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId> <locationId>` returns true.
-	- Any missing/non-allowlisted `(appId, locationId)` pair is returned as `ignored/location_not_enabled`.
-- The allowlist is stored as Redis sets under `${GHL_WEBHOOK_ALLOWLIST_KEY}:<appId>` with `locationId` members.
-- Supported inbound event types: `ContactCreate`, `ContactUpdate`, `ContactTagUpdate`, `ContactDelete`, `OpportunityCreate`, `OpportunityUpdate`, `OpportunityDelete`, `OpportunityStageUpdate`.
+	- Lambda only queues when the GHL webhook signature verifies against `GHL_WEBHOOK_PUBLIC_KEY`.
+	- Invalid/missing signatures are rejected; downstream filtering (per-dealership/app routing) happens in the BullMQ workers.
+- Supported inbound event types: `ContactCreate`, `ContactUpdate`, `ContactTagUpdate`, `ContactDelete`, `OpportunityCreate`, `OpportunityUpdate`, `OpportunityDelete`, `OpportunityStageUpdate`, `AppointmentCreate`, `AppointmentUpdate`, `AppointmentDelete`, `InboundMessage`, `OutboundMessage`.
 - Queue names should match worker BullMQ queues (contact vs opportunity). Jobs are debounced by job id and removed on completion or failure.
 - Opportunity deletes bypass debounce and enqueue immediately. A short-lived Redis guard blocks follow-up opportunity update/stage events for the same `(appId, locationId, opportunityId)` while the delete guard is active.
 - Contact events include rollup metadata (`rollupCount`, `rollupFirstSeenAt`, `rollupLastSeenAt`) so workers can persist one inbox row per coalesced burst.

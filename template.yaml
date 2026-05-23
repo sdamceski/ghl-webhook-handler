@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: GHL webhook listener (signature check + Redis allowlist + enqueue)
+Description: GHL webhook listener (signature check + enqueue)
 
 Parameters:
   DeployEnvironment:
@@ -24,12 +24,15 @@ Parameters:
   RedisSecretKey:
     Type: String
     Default: REDIS_URL
-  AllowlistKey:
-    Type: String
-    Default: ghl:webhook:allowlist
   QueueName:
     Type: String
     Default: ghl-inbound-contact-update
+  MessageQueueName:
+    Type: String
+    Default: ghl-message-ingest
+  MessageJobName:
+    Type: String
+    Default: ghl.message.ingest
   PublicKeySecretKey:
     Type: String
     Default: GHL_WEBHOOK_PUBLIC_KEY
@@ -69,8 +72,9 @@ Resources:
       Environment:
         Variables:
           REDIS_URL: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${RedisSecretKey}}}"
-          GHL_WEBHOOK_ALLOWLIST_KEY: !Ref AllowlistKey
           GHL_WEBHOOK_QUEUE_NAME: !Ref QueueName
+          GHL_WEBHOOK_MESSAGE_QUEUE_NAME: !Ref MessageQueueName
+          GHL_WEBHOOK_MESSAGE_JOB_NAME: !Ref MessageJobName
           GHL_WEBHOOK_PUBLIC_KEY: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${PublicKeySecretKey}}}"
           GHL_WEBHOOK_BULLMQ_PREFIX: !Ref BullmqPrefix
           GHL_WEBHOOK_WAIT_TTL_MS: !Ref WaitTtlMs
