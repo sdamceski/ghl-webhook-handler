@@ -1,0 +1,79 @@
+name: Deploy GHL webhook listener (dev)
+
+on:
+  push:
+    branches:
+      - dev-lambda
+  workflow_dispatch:
+
+jobs:
+  deploy-dev:
+    name: Deploy Lambda via SAM (dev)
+    environment:
+      name: dev
+    runs-on: [self-hosted, dev]
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: us-east-2
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (dev)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEV_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build with SAM
+        run: sam build
+
+      - name: Cleanup failed dev stack state
+        run: |
+          STACK_NAME="ghl-webhook-events-dev"
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || true)
+
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Deleting $STACK_NAME in ROLLBACK_COMPLETE before deploy..."
+            aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "${AWS_REGION}"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "${AWS_REGION}"
+          else
+            echo "Stack status is '$STATUS'; no cleanup needed."
+          fi
+
+      - name: Deploy stack (dev)
+        run: |
+          sam deploy \
+            --stack-name ghl-webhook-events-dev \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --region "${AWS_REGION}" \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              DeployEnvironment="dev" \
+              FunctionName="ghl-webhook-events-dev" \
+              ExecutionRoleArn="arn:aws:iam::214046906223:role/ghl-webhook-events-stagin-GhlWebhookEventsStagingFu-PrGlDdAdrA43" \
+              SecretsManagerArn="arn:aws:secretsmanager:us-east-2:214046906223:secret:starauto-dev-secrets-4dpdD4" \
+              RedisSecretKey="REDIS_URL" \
+              QueueName="ghl-inbound-contact-update" \
+              PublicKeySecretKey="GHL_WEBHOOK_PUBLIC_KEY" \
+              BullmqPrefix="{starauto-bull}" \
+              WaitTtlMs="60000"
