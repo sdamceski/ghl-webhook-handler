@@ -237,7 +237,7 @@ const computePayloadHash = (payload: Record<string, unknown>): string =>
 const buildJobId = (appId: string | null, locationId: string | null, entityId: string): string => {
   const appSegment = appId ? appId.trim() : 'noapp';
   const locationSegment = locationId ? locationId.trim() : 'noloc';
-  return `${appSegment}:${locationSegment}:${entityId}`;
+  return `${appSegment}_${locationSegment}_${entityId}`;
 };
 
 const buildOpportunityDeleteGuardKey = (
@@ -711,7 +711,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       );
       const appSegment = appId ? appId.trim() : 'noapp';
       const locationSegment = locationId ? locationId.trim() : 'noloc';
-      const messageJobId = `${appSegment}:${locationSegment}:msg:${messageId as string}`;
+      const messageJobId = `${appSegment}_${locationSegment}_msg_${messageId as string}`;
       const messageJobData = {
         source: 'ghl' as const,
         eventType,
