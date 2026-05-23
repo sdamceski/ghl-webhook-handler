@@ -2,7 +2,7 @@
   "name": "starauto-ghl-webhook-listener",
   "version": "0.1.0",
   "private": true,
-  "description": "GHL webhook Lambda (signature check + Redis allowlist + enqueue)",
+  "description": "GHL webhook Lambda (signature check + enqueue)",
   "license": "UNLICENSED",
   "main": "dist/handler.js",
   "scripts": {

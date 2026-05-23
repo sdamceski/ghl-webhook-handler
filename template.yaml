@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: GHL webhook listener (signature check + Redis allowlist + enqueue)
+Description: GHL webhook listener (signature check + enqueue)
 
 Parameters:
   DeployEnvironment:
@@ -9,25 +9,45 @@ Parameters:
   FunctionName:
     Type: String
     Default: ghl-webhook-events-staging
+  ExecutionRoleArn:
+    Type: String
+    Default: arn:aws:iam::214046906223:role/ghl-webhook-events-stagin-GhlWebhookEventsStagingFu-PrGlDdAdrA43
   VpcSubnetIds:
     Type: String
+    Default: ""
   VpcSecurityGroupIds:
     Type: String
+    Default: ""
   SecretsManagerArn:
     Type: String
     Default: arn:aws:secretsmanager:us-east-2:214046906223:secret:staging-secrets-PT0K6h
   RedisSecretKey:
     Type: String
     Default: REDIS_URL
-  AllowlistKey:
-    Type: String
-    Default: ghl:webhook:allowlist
   QueueName:
     Type: String
     Default: ghl-inbound-contact-update
+  MessageQueueName:
+    Type: String
+    Default: ghl-message-ingest
+  MessageJobName:
+    Type: String
+    Default: ghl.message.ingest
   PublicKeySecretKey:
     Type: String
     Default: GHL_WEBHOOK_PUBLIC_KEY
+  BullmqPrefix:
+    Type: String
+    Default: "{starauto-bull}"
+  WaitTtlMs:
+    Type: String
+    Default: "0"
+
+Conditions:
+  UseVpcConfig:
+    !And
+      - !Not [!Equals [!Ref VpcSubnetIds, ""]]
+      - !Not [!Equals [!Ref VpcSecurityGroupIds, ""]]
 
 Globals:
   Function:
@@ -43,17 +63,21 @@ Resources:
       FunctionName: !Ref FunctionName
       Handler: handler.handler
       CodeUri: .
-      Policies:
-        - AWSLambdaVPCAccessExecutionRole
-      VpcConfig:
-        SecurityGroupIds: !Split [",", !Ref VpcSecurityGroupIds]
-        SubnetIds: !Split [",", !Ref VpcSubnetIds]
+      Role: !Ref ExecutionRoleArn
+      VpcConfig: !If
+        - UseVpcConfig
+        - SecurityGroupIds: !Split [",", !Ref VpcSecurityGroupIds]
+          SubnetIds: !Split [",", !Ref VpcSubnetIds]
+        - !Ref AWS::NoValue
       Environment:
         Variables:
           REDIS_URL: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${RedisSecretKey}}}"
-          GHL_WEBHOOK_ALLOWLIST_KEY: !Ref AllowlistKey
           GHL_WEBHOOK_QUEUE_NAME: !Ref QueueName
+          GHL_WEBHOOK_MESSAGE_QUEUE_NAME: !Ref MessageQueueName
+          GHL_WEBHOOK_MESSAGE_JOB_NAME: !Ref MessageJobName
           GHL_WEBHOOK_PUBLIC_KEY: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${PublicKeySecretKey}}}"
+          GHL_WEBHOOK_BULLMQ_PREFIX: !Ref BullmqPrefix
+          GHL_WEBHOOK_WAIT_TTL_MS: !Ref WaitTtlMs
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
