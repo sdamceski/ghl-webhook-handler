@@ -5,15 +5,23 @@ Minimal AWS Lambda that verifies GHL webhook signatures and enqueues the payload
 ## Environment variables
 
 - `REDIS_URL` (required)
-- `GHL_WEBHOOK_PUBLIC_KEY` (required, PEM)
+- `GHL_WEBHOOK_PUBLIC_KEY` (required, PEM) — legacy RSA public key used to verify the deprecated `X-Wh-Signature` header (deprecated 2026-09-01)
+- `GHL_WEBHOOK_ED25519_PUBLIC_KEY` (optional, PEM) — override for the Ed25519 public key used to verify `X-GHL-Signature`. Defaults to the value published in the HighLevel docs; only set this if HighLevel rotates the key.
 - `GHL_WEBHOOK_CONTACT_QUEUE_NAME` (optional, default: `ghl-inbound-contact-update`)
 - `GHL_WEBHOOK_CONTACT_JOB_NAME` (optional, default: `ghl.contact.update`)
 - `GHL_WEBHOOK_OPPORTUNITY_QUEUE_NAME` (optional, default: `ghl-opportunity-sync`)
 - `GHL_WEBHOOK_OPPORTUNITY_JOB_NAME` (optional, default: `ghl.opportunity.sync`)
+- `GHL_WEBHOOK_APPOINTMENT_QUEUE_NAME` (optional, default: `ghl-appointment-sync`)
+- `GHL_WEBHOOK_APPOINTMENT_JOB_NAME` (optional, default: `ghl.appointment.sync`)
+- `GHL_WEBHOOK_MESSAGE_QUEUE_NAME` (optional, default: `ghl-message-ingest`)
+- `GHL_WEBHOOK_MESSAGE_JOB_NAME` (optional, default: `ghl.message.ingest`)
+- `GHL_WEBHOOK_APP_INSTALL_QUEUE_NAME` (optional, default: `ghl-app-install-events`) — queue for `INSTALL` and `UNINSTALL` app lifecycle events
+- `GHL_WEBHOOK_APP_INSTALL_JOB_NAME` (optional, default: `ghl.app-install-event`)
 - `GHL_WEBHOOK_QUEUE_NAME` (legacy fallback for contact queue)
 - `GHL_WEBHOOK_JOB_NAME` (legacy fallback for contact job)
 - `GHL_WEBHOOK_CONTACT_DEBOUNCE_MS` (optional, default: `3500`)
 - `GHL_WEBHOOK_OPPORTUNITY_DELETE_GUARD_SECONDS` (optional, default: `30`)
+- `GHL_WEBHOOK_APPOINTMENT_DELETE_GUARD_SECONDS` (optional, default: `30`)
 - `GHL_WEBHOOK_JOB_ATTEMPTS` (optional, default: `5`)
 - `GHL_WEBHOOK_JOB_BACKOFF_MS` (optional, default: `1000`)
 - `GHL_WEBHOOK_WAIT_TTL_MS` (optional, default: `0`; when set > 0, removes stale `wait`/`delayed` jobs older than this TTL)
@@ -58,11 +66,12 @@ That role trusts GitHub's OIDC provider (`token.actions.githubusercontent.com`) 
 ## Notes
 
 - Auth decisions are strict and fail-closed:
-	- Lambda only queues when the GHL webhook signature verifies against `GHL_WEBHOOK_PUBLIC_KEY`.
+	- Lambda only queues when the GHL webhook signature verifies. Prefers Ed25519 `X-GHL-Signature` when present; falls back to legacy RSA `X-Wh-Signature` during the transition period (RSA header is deprecated by HighLevel on 2026-09-01).
 	- Invalid/missing signatures are rejected; downstream filtering (per-dealership/app routing) happens in the BullMQ workers.
-- Supported inbound event types: `ContactCreate`, `ContactUpdate`, `ContactTagUpdate`, `ContactDelete`, `OpportunityCreate`, `OpportunityUpdate`, `OpportunityDelete`, `OpportunityStageUpdate`, `AppointmentCreate`, `AppointmentUpdate`, `AppointmentDelete`, `InboundMessage`, `OutboundMessage`.
-- Queue names should match worker BullMQ queues (contact vs opportunity). Jobs are debounced by job id and removed on completion or failure.
+- Supported inbound event types: `ContactCreate`, `ContactUpdate`, `ContactTagUpdate`, `ContactDelete`, `OpportunityCreate`, `OpportunityUpdate`, `OpportunityDelete`, `OpportunityStageUpdate`, `AppointmentCreate`, `AppointmentUpdate`, `AppointmentDelete`, `InboundMessage`, `OutboundMessage`, `INSTALL`, `UNINSTALL`.
+- `INSTALL` / `UNINSTALL` events are auto-subscribed by HighLevel when a webhook URL is configured. They route to `ghl-app-install-events` and skip the debounce/rollup infrastructure used for CRM data-plane events (they are one-shot lifecycle events). Location-level installs carry a `locationId`; agency-level installs do not.
+- Queue names should match worker BullMQ queues (contact vs opportunity vs app-install). Jobs are debounced by job id and removed on completion or failure.
 - Opportunity deletes bypass debounce and enqueue immediately. A short-lived Redis guard blocks follow-up opportunity update/stage events for the same `(appId, locationId, opportunityId)` while the delete guard is active.
 - Contact events include rollup metadata (`rollupCount`, `rollupFirstSeenAt`, `rollupLastSeenAt`) so workers can persist one inbox row per coalesced burst.
-- Analytics counters are stored in hourly Redis hashes under `ghl:analytics:hour:YYYYMMDDHH` with `location:<locationId>:event:<eventType>:allowed|blocked` fields.
+- Analytics counters are stored in hourly Redis hashes under `ghl:analytics:hour:YYYYMMDDHH` with `location:<locationId>:event:<eventType>:allowed|blocked` fields. For agency-level lifecycle events (no locationId), the `companyId` is used in the location slot.
 - If `git push` fails with a permissions error in Codespaces, retry with `env -u GITHUB_TOKEN git -C /workspaces/ghl-webhook-handler push origin <branch>`.
