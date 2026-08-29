@@ -716,11 +716,17 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     // Route + return early so the rest of the handler stays focused on those.
     if (isAppLifecycleEvent) {
       const appLifecycle = extractAppLifecycleFields(payload);
-      if (!appLifecycle.appId || !appLifecycle.companyId) {
-        console.warn('[ghl-webhook] app lifecycle missing appId or companyId', {
+      // Accept the event if we have appId + (companyId OR locationId). Location-
+      // level UNINSTALLs sometimes arrive with companyId=null — the backend
+      // worker can resolve the agency by joining dealer_ghl_integration on
+      // ghl_location_id. Fully-anonymous events (no company, no location) still
+      // get rejected because we can't route them.
+      if (!appLifecycle.appId || (!appLifecycle.companyId && !appLifecycle.locationId)) {
+        console.warn('[ghl-webhook] app lifecycle missing appId and (companyId or locationId)', {
           eventType,
           appId: appLifecycle.appId,
-          companyId: appLifecycle.companyId
+          companyId: appLifecycle.companyId,
+          locationId: appLifecycle.locationId
         });
         await incrementAnalytics(redis, 'blocked', locationId, eventType);
         return {
@@ -737,7 +743,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const payloadHash = computePayloadHash(payload);
       const dedupSegment = webhookId ?? payloadHash.slice(0, 16);
       const locSegment = appLifecycle.locationId ?? 'noloc';
-      const jobId = `${eventType.toLowerCase()}_${appLifecycle.appId}_${appLifecycle.companyId}_${locSegment}_${dedupSegment}`
+      const companySegment = appLifecycle.companyId ?? 'nocompany';
+      const jobId = `${eventType.toLowerCase()}_${appLifecycle.appId}_${companySegment}_${locSegment}_${dedupSegment}`
         .replace(/:/g, '_');
 
       const jobData = {
