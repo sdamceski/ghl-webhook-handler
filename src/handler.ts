@@ -23,9 +23,12 @@ type EnvConfig = {
   appointmentJobName: string;
   messageQueueName: string;
   messageJobName: string;
+  appInstallQueueName: string;
+  appInstallJobName: string;
   opportunityDeleteGuardSeconds: number;
   appointmentDeleteGuardSeconds: number;
-  publicKey: string;
+  publicKey: string | null;
+  ed25519PublicKey: string;
   bullmqPrefix: string;
   debounceMs: number;
   jobAttempts: number;
@@ -80,6 +83,7 @@ const OPPORTUNITY_EVENT_TYPES = new Set([
 ]);
 const APPOINTMENT_EVENT_TYPES = new Set(['AppointmentCreate', 'AppointmentUpdate', 'AppointmentDelete']);
 const MESSAGE_EVENT_TYPES = new Set(['InboundMessage', 'OutboundMessage']);
+const APP_LIFECYCLE_EVENT_TYPES = new Set(['INSTALL', 'UNINSTALL']);
 const CONTACT_ROLLUP_PREFIX = 'ghl:contact-rollup';
 const isRecord = (value: unknown): value is WebhookEnvelope =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -147,6 +151,12 @@ const normalizeEventType = (value: string | null): string | null => {
   if (normalized === 'outboundmessage') {
     return 'OutboundMessage';
   }
+  if (normalized === 'install' || normalized === 'installed') {
+    return 'INSTALL';
+  }
+  if (normalized === 'uninstall' || normalized === 'uninstalled') {
+    return 'UNINSTALL';
+  }
   return value;
 };
 
@@ -188,13 +198,81 @@ const extractMessageIds = (
   };
 };
 
-const getSignatureHeader = (headers: Record<string, string | undefined> | undefined): string | undefined => {
+type AppLifecycleFields = {
+  appId: string | null;
+  companyId: string | null;
+  locationId: string | null;
+  userId: string | null;
+  planId: string | null;
+  trial: Record<string, unknown> | null;
+  isWhitelabelCompany: boolean | null;
+  whitelabelDetails: Record<string, unknown> | null;
+  companyName: string | null;
+};
+
+// Unlike extractWebhookIds, we DO NOT let locationId fall back to companyId.
+// INSTALL/UNINSTALL payloads use presence-of-locationId to differentiate a
+// Location-level install from an Agency-level install — collapsing them would
+// break routing decisions in the downstream worker.
+const extractAppLifecycleFields = (payload: unknown): AppLifecycleFields => {
+  if (!isRecord(payload)) {
+    return {
+      appId: null,
+      companyId: null,
+      locationId: null,
+      userId: null,
+      planId: null,
+      trial: null,
+      isWhitelabelCompany: null,
+      whitelabelDetails: null,
+      companyName: null
+    };
+  }
+  const trial = isRecord(payload.trial) ? (payload.trial as Record<string, unknown>) : null;
+  const whitelabelDetails = isRecord(payload.whitelabelDetails)
+    ? (payload.whitelabelDetails as Record<string, unknown>)
+    : null;
+  const isWhitelabelCompanyRaw = payload.isWhitelabelCompany;
+  return {
+    appId: coerceString(payload.appId ?? payload.app_id),
+    companyId: coerceString(payload.companyId ?? payload.company_id),
+    locationId: coerceString(payload.locationId ?? payload.location_id),
+    userId: coerceString(payload.userId ?? payload.user_id),
+    planId: coerceString(payload.planId ?? payload.plan_id),
+    trial,
+    isWhitelabelCompany: typeof isWhitelabelCompanyRaw === 'boolean' ? isWhitelabelCompanyRaw : null,
+    whitelabelDetails,
+    companyName: coerceString(payload.companyName ?? payload.company_name)
+  };
+};
+
+// GHL is deprecating the RSA X-Wh-Signature header on 2026-09-01 in favor of
+// Ed25519 X-GHL-Signature. This public key is documented at
+// https://marketplace.gohighlevel.com/docs/webhook/WebhookIntegrationGuide
+// It is a stable global value; env override is supported for emergency rotation.
+const DEFAULT_GHL_ED25519_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAi2HR1srL4o18O8BRa7gVJY7G7bupbN3H9AwJrHCDiOg=
+-----END PUBLIC KEY-----`;
+
+const getHeaderCaseInsensitive = (
+  headers: Record<string, string | undefined> | undefined,
+  name: string
+): string | undefined => {
   if (!headers) return undefined;
-  const direct = headers['x-wh-signature'] ?? headers['X-Wh-Signature'];
+  const direct = headers[name];
   if (direct) return direct;
-  const key = Object.keys(headers).find((header) => header.toLowerCase() === 'x-wh-signature');
+  const lowered = name.toLowerCase();
+  const key = Object.keys(headers).find((header) => header.toLowerCase() === lowered);
   return key ? headers[key] : undefined;
 };
+
+const getLegacyRsaSignatureHeader = (
+  headers: Record<string, string | undefined> | undefined
+): string | undefined => getHeaderCaseInsensitive(headers, 'x-wh-signature');
+
+const getGhlSignatureHeader = (
+  headers: Record<string, string | undefined> | undefined
+): string | undefined => getHeaderCaseInsensitive(headers, 'x-ghl-signature');
 
 const decodeSignature = (signature: string | undefined): string | undefined => {
   if (!signature) return signature;
@@ -206,11 +284,7 @@ const decodeSignature = (signature: string | undefined): string | undefined => {
   }
 };
 
-const verifyWebhookSignature = (rawBody: Buffer | null, signature: string | undefined, publicKey: string): boolean => {
-  if (!rawBody || !signature) {
-    return false;
-  }
-
+const verifyRsaSignature = (rawBody: Buffer, signature: string, publicKey: string): boolean => {
   try {
     const verifier = crypto.createVerify('SHA256');
     verifier.update(rawBody);
@@ -219,6 +293,58 @@ const verifyWebhookSignature = (rawBody: Buffer | null, signature: string | unde
   } catch {
     return false;
   }
+};
+
+const verifyEd25519Signature = (rawBody: Buffer, signature: string, publicKey: string): boolean => {
+  try {
+    const signatureBuffer = Buffer.from(signature, 'base64');
+    return crypto.verify(null, rawBody, publicKey, signatureBuffer);
+  } catch {
+    return false;
+  }
+};
+
+type SignatureVerification = {
+  ok: boolean;
+  scheme: 'ed25519' | 'rsa' | 'none';
+  reason?: string;
+};
+
+// Prefer Ed25519 when present. Fall back to legacy RSA during transition
+// (RSA header goes away 2026-09-01). Reject when neither is signed. If the
+// legacy RSA public key is not configured (env var / secret unavailable), we
+// still accept Ed25519 but reject RSA-only signatures — this keeps the
+// Lambda bootable when the shared secret bundle omits the RSA key.
+const verifyGhlWebhookSignature = (
+  rawBody: Buffer | null,
+  headers: Record<string, string | undefined> | undefined,
+  legacyRsaPublicKey: string | null,
+  ed25519PublicKey: string
+): SignatureVerification => {
+  if (!rawBody) {
+    return { ok: false, scheme: 'none', reason: 'no_body' };
+  }
+
+  const ghlSignature = decodeSignature(getGhlSignatureHeader(headers));
+  if (ghlSignature) {
+    return {
+      ok: verifyEd25519Signature(rawBody, ghlSignature, ed25519PublicKey),
+      scheme: 'ed25519'
+    };
+  }
+
+  const legacySignature = decodeSignature(getLegacyRsaSignatureHeader(headers));
+  if (legacySignature) {
+    if (!legacyRsaPublicKey) {
+      return { ok: false, scheme: 'rsa', reason: 'rsa_key_unavailable' };
+    }
+    return {
+      ok: verifyRsaSignature(rawBody, legacySignature, legacyRsaPublicKey),
+      scheme: 'rsa'
+    };
+  }
+
+  return { ok: false, scheme: 'none', reason: 'no_signature' };
 };
 
 const parseBody = (body: string | null | undefined): WebhookEnvelope | null => {
@@ -237,7 +363,7 @@ const computePayloadHash = (payload: Record<string, unknown>): string =>
 const buildJobId = (appId: string | null, locationId: string | null, entityId: string): string => {
   const appSegment = appId ? appId.trim() : 'noapp';
   const locationSegment = locationId ? locationId.trim() : 'noloc';
-  return `${appSegment}:${locationSegment}:${entityId}`;
+  return `${appSegment}_${locationSegment}_${entityId}`;
 };
 
 const buildOpportunityDeleteGuardKey = (
@@ -314,10 +440,9 @@ const getEnvConfig = (): EnvConfig => {
     throw new Error('Missing REDIS_URL');
   }
 
-  const publicKey = process.env.GHL_WEBHOOK_PUBLIC_KEY;
-  if (!publicKey) {
-    throw new Error('Missing GHL_WEBHOOK_PUBLIC_KEY');
-  }
+  const publicKey = process.env.GHL_WEBHOOK_PUBLIC_KEY?.trim() || null;
+
+  const ed25519PublicKey = process.env.GHL_WEBHOOK_ED25519_PUBLIC_KEY?.trim() || DEFAULT_GHL_ED25519_PUBLIC_KEY_PEM;
 
   const debounceRaw = process.env.GHL_WEBHOOK_CONTACT_DEBOUNCE_MS;
   const parsedDebounce = debounceRaw ? Number(debounceRaw) : Number.NaN;
@@ -326,6 +451,7 @@ const getEnvConfig = (): EnvConfig => {
   return {
     redisUrl,
     publicKey,
+    ed25519PublicKey,
     contactQueueName: process.env.GHL_WEBHOOK_CONTACT_QUEUE_NAME
       ?? process.env.GHL_WEBHOOK_QUEUE_NAME
       ?? 'ghl-inbound-contact-update',
@@ -338,6 +464,8 @@ const getEnvConfig = (): EnvConfig => {
     appointmentJobName: process.env.GHL_WEBHOOK_APPOINTMENT_JOB_NAME ?? 'ghl.appointment.sync',
     messageQueueName: process.env.GHL_WEBHOOK_MESSAGE_QUEUE_NAME ?? 'ghl-message-ingest',
     messageJobName: process.env.GHL_WEBHOOK_MESSAGE_JOB_NAME ?? 'ghl.message.ingest',
+    appInstallQueueName: process.env.GHL_WEBHOOK_APP_INSTALL_QUEUE_NAME ?? 'ghl-app-install-events',
+    appInstallJobName: process.env.GHL_WEBHOOK_APP_INSTALL_JOB_NAME ?? 'ghl.app-install-event',
     opportunityDeleteGuardSeconds: parsePositiveIntEnv(
       'GHL_WEBHOOK_OPPORTUNITY_DELETE_GUARD_SECONDS',
       DEFAULT_OPPORTUNITY_DELETE_GUARD_SECONDS
@@ -499,7 +627,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     appointmentDeleteGuardSeconds,
     messageQueueName,
     messageJobName,
+    appInstallQueueName,
+    appInstallJobName,
     publicKey,
+    ed25519PublicKey,
     bullmqPrefix,
     debounceMs,
     jobAttempts,
@@ -533,9 +664,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
-    const signature = decodeSignature(getSignatureHeader(event.headers));
-    if (!verifyWebhookSignature(rawBody, signature, publicKey)) {
-      console.warn('[ghl-webhook] invalid signature');
+    const signatureVerification = verifyGhlWebhookSignature(rawBody, event.headers, publicKey, ed25519PublicKey);
+    if (!signatureVerification.ok) {
+      console.warn('[ghl-webhook] invalid signature', {
+        scheme: signatureVerification.scheme,
+        reason: signatureVerification.reason ?? 'verify_failed'
+      });
       await incrementAnalytics(redis, 'blocked', locationId, eventType);
       return {
         statusCode: 401,
@@ -544,20 +678,110 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
+    if (signatureVerification.scheme === 'rsa') {
+      // Nudge to switch signers before the 2026-09-01 deprecation.
+      console.info('[ghl-webhook] legacy RSA signature accepted (deprecated)', {
+        appId,
+        locationId,
+        eventType
+      });
+    }
+
     const isContactEvent = CONTACT_EVENT_TYPES.has(eventType);
     const isOpportunityEvent = OPPORTUNITY_EVENT_TYPES.has(eventType);
     const isAppointmentEvent = APPOINTMENT_EVENT_TYPES.has(eventType);
     const isMessageEvent = MESSAGE_EVENT_TYPES.has(eventType);
+    const isAppLifecycleEvent = APP_LIFECYCLE_EVENT_TYPES.has(eventType);
     const isOpportunityDeleteEvent = isOpportunityEvent && eventType === 'OpportunityDelete';
     const isAppointmentDeleteEvent = isAppointmentEvent && eventType === 'AppointmentDelete';
 
-    if (!isContactEvent && !isOpportunityEvent && !isAppointmentEvent && !isMessageEvent) {
+    if (
+      !isContactEvent &&
+      !isOpportunityEvent &&
+      !isAppointmentEvent &&
+      !isMessageEvent &&
+      !isAppLifecycleEvent
+    ) {
       console.log('[ghl-webhook] ignored unsupported event type', { eventType });
       await incrementAnalytics(redis, 'blocked', locationId, eventType);
       return {
         statusCode: 202,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'ignored', reason: 'unsupported_event_type' })
+      };
+    }
+
+    // App lifecycle events (INSTALL/UNINSTALL) use their own queue and don't need
+    // the debounce/rollup infrastructure the CRM data-plane events share below.
+    // Route + return early so the rest of the handler stays focused on those.
+    if (isAppLifecycleEvent) {
+      const appLifecycle = extractAppLifecycleFields(payload);
+      if (!appLifecycle.appId || !appLifecycle.companyId) {
+        console.warn('[ghl-webhook] app lifecycle missing appId or companyId', {
+          eventType,
+          appId: appLifecycle.appId,
+          companyId: appLifecycle.companyId
+        });
+        await incrementAnalytics(redis, 'blocked', locationId, eventType);
+        return {
+          statusCode: 400,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'error', reason: 'app_lifecycle_ids_required' })
+        };
+      }
+
+      queue = new Queue(appInstallQueueName, { connection: redis, prefix: bullmqPrefix });
+      await cleanStaleQueuedJobs(queue, waitTtlMs);
+
+      const webhookId = extractWebhookId(payload);
+      const payloadHash = computePayloadHash(payload);
+      const dedupSegment = webhookId ?? payloadHash.slice(0, 16);
+      const locSegment = appLifecycle.locationId ?? 'noloc';
+      const jobId = `${eventType.toLowerCase()}_${appLifecycle.appId}_${appLifecycle.companyId}_${locSegment}_${dedupSegment}`
+        .replace(/:/g, '_');
+
+      const jobData = {
+        source: 'ghl' as const,
+        eventType,
+        webhookId,
+        appId: appLifecycle.appId,
+        companyId: appLifecycle.companyId,
+        locationId: appLifecycle.locationId,
+        userId: appLifecycle.userId,
+        planId: appLifecycle.planId,
+        trial: appLifecycle.trial,
+        isWhitelabelCompany: appLifecycle.isWhitelabelCompany,
+        whitelabelDetails: appLifecycle.whitelabelDetails,
+        companyName: appLifecycle.companyName,
+        payloadHash,
+        payload,
+        authState: 'allowed' as const,
+        authValidated: true
+      };
+
+      await queue.add(appInstallJobName, jobData, {
+        jobId,
+        attempts: jobAttempts,
+        backoff: { type: 'exponential', delay: jobBackoffMs },
+        removeOnComplete: { count: 100 },
+        removeOnFail: { count: 1000 }
+      });
+
+      await incrementAnalytics(redis, 'allowed', appLifecycle.locationId ?? appLifecycle.companyId, eventType);
+
+      console.log('[ghl-webhook] queued app lifecycle event', {
+        eventType,
+        appId: appLifecycle.appId,
+        companyId: appLifecycle.companyId,
+        locationId: appLifecycle.locationId,
+        installType: appLifecycle.locationId ? 'Location' : 'Agency',
+        jobId
+      });
+
+      return {
+        statusCode: 202,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'queued' })
       };
     }
 
@@ -711,7 +935,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       );
       const appSegment = appId ? appId.trim() : 'noapp';
       const locationSegment = locationId ? locationId.trim() : 'noloc';
-      const messageJobId = `${appSegment}:${locationSegment}:msg:${messageId as string}`;
+      const messageJobId = `${appSegment}_${locationSegment}_msg_${messageId as string}`;
       const messageJobData = {
         source: 'ghl' as const,
         eventType,
