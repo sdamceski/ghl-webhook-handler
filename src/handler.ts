@@ -27,7 +27,7 @@ type EnvConfig = {
   appInstallJobName: string;
   opportunityDeleteGuardSeconds: number;
   appointmentDeleteGuardSeconds: number;
-  publicKey: string;
+  publicKey: string | null;
   ed25519PublicKey: string;
   bullmqPrefix: string;
   debounceMs: number;
@@ -311,11 +311,14 @@ type SignatureVerification = {
 };
 
 // Prefer Ed25519 when present. Fall back to legacy RSA during transition
-// (RSA header goes away 2026-09-01). Reject when neither is signed.
+// (RSA header goes away 2026-09-01). Reject when neither is signed. If the
+// legacy RSA public key is not configured (env var / secret unavailable), we
+// still accept Ed25519 but reject RSA-only signatures — this keeps the
+// Lambda bootable when the shared secret bundle omits the RSA key.
 const verifyGhlWebhookSignature = (
   rawBody: Buffer | null,
   headers: Record<string, string | undefined> | undefined,
-  legacyRsaPublicKey: string,
+  legacyRsaPublicKey: string | null,
   ed25519PublicKey: string
 ): SignatureVerification => {
   if (!rawBody) {
@@ -332,6 +335,9 @@ const verifyGhlWebhookSignature = (
 
   const legacySignature = decodeSignature(getLegacyRsaSignatureHeader(headers));
   if (legacySignature) {
+    if (!legacyRsaPublicKey) {
+      return { ok: false, scheme: 'rsa', reason: 'rsa_key_unavailable' };
+    }
     return {
       ok: verifyRsaSignature(rawBody, legacySignature, legacyRsaPublicKey),
       scheme: 'rsa'
@@ -434,10 +440,7 @@ const getEnvConfig = (): EnvConfig => {
     throw new Error('Missing REDIS_URL');
   }
 
-  const publicKey = process.env.GHL_WEBHOOK_PUBLIC_KEY;
-  if (!publicKey) {
-    throw new Error('Missing GHL_WEBHOOK_PUBLIC_KEY');
-  }
+  const publicKey = process.env.GHL_WEBHOOK_PUBLIC_KEY?.trim() || null;
 
   const ed25519PublicKey = process.env.GHL_WEBHOOK_ED25519_PUBLIC_KEY?.trim() || DEFAULT_GHL_ED25519_PUBLIC_KEY_PEM;
 

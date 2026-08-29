@@ -83,7 +83,6 @@ Resources:
           GHL_WEBHOOK_MESSAGE_JOB_NAME: !Ref MessageJobName
           GHL_WEBHOOK_APP_INSTALL_QUEUE_NAME: !Ref AppInstallQueueName
           GHL_WEBHOOK_APP_INSTALL_JOB_NAME: !Ref AppInstallJobName
-          GHL_WEBHOOK_PUBLIC_KEY: !Sub "{{resolve:secretsmanager:${SecretsManagerArn}:SecretString:${PublicKeySecretKey}}}"
           GHL_WEBHOOK_BULLMQ_PREFIX: !Ref BullmqPrefix
           GHL_WEBHOOK_WAIT_TTL_MS: !Ref WaitTtlMs
     Metadata:
