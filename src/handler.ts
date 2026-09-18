@@ -1,6 +1,7 @@
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
 import crypto from 'crypto';
 import { appointmentJobOptions } from './appointmentEventIdentity';
+import { messageEventJobId } from './messageEventIdentity';
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
 
@@ -857,7 +858,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         ? opportunityJobName
         : messageJobName;
     queue = new Queue(queueName, { connection: redis, prefix: bullmqPrefix });
-    await cleanStaleQueuedJobs(queue, waitTtlMs);
+    // Every message status event matters; contact-style cleanup must not discard queued receipts.
+    if (!isMessageEvent) await cleanStaleQueuedJobs(queue, waitTtlMs);
     const webhookId = extractWebhookId(payload);
     const payloadHash = computePayloadHash(payload);
 
@@ -890,9 +892,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         (payload as Record<string, unknown>).conversationProviderId ??
           (payload as Record<string, unknown>).conversation_provider_id
       );
-      const appSegment = appId ? appId.trim() : 'noapp';
-      const locationSegment = locationId ? locationId.trim() : 'noloc';
-      const messageJobId = `${appSegment}_${locationSegment}_msg_${messageId as string}`;
       const messageJobData = {
         source: 'ghl' as const,
         eventType,
@@ -910,10 +909,16 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         authState: 'allowed' as const,
         authValidated: true
       };
+      const messageJobId = messageEventJobId(messageJobData);
       await queue.add(jobName, messageJobData, {
         ...retryOptions,
         jobId: messageJobId,
+        removeOnFail: false,
         delay: 0
+      });
+      console.log('[ghl-webhook] message enqueue accepted', {
+        jobId: messageJobId, webhookId, messageId, eventType,
+        status: coerceString(payload.status), locationId
       });
     } else if (rollupKey) {
       const existing = parseRollupRecord(await redis.get(rollupKey));
