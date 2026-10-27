@@ -78,7 +78,10 @@ const OPPORTUNITY_EVENT_TYPES = new Set([
   'OpportunityCreate',
   'OpportunityUpdate',
   'OpportunityDelete',
-  'OpportunityStageUpdate'
+  'OpportunityStageUpdate',
+  'OpportunityStatusUpdate',
+  'OpportunityAssignedToUpdate',
+  'OpportunityMonetaryValueUpdate'
 ]);
 const APPOINTMENT_EVENT_TYPES = new Set(['AppointmentCreate', 'AppointmentUpdate', 'AppointmentDelete']);
 const MESSAGE_EVENT_TYPES = new Set(['InboundMessage', 'OutboundMessage']);
@@ -117,6 +120,9 @@ const normalizeEventType = (value: string | null): string | null => {
   if (!value) return value;
   if (value === 'ContactUpdate') return value;
   const normalized = value.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  for (const type of OPPORTUNITY_EVENT_TYPES) {
+    if (normalized === type.toLowerCase()) return type;
+  }
   if (normalized === 'contactupdate' || normalized === 'contactupdated') {
     return 'ContactUpdate';
   }
@@ -1029,6 +1035,18 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           jobId: deleteJobId,
           delay: 0,
           priority: 1
+        });
+      } else if (isOpportunityEvent) {
+        // Opportunities are delivered immediately, independently of contact rollups.
+        // Use an event-specific ID so a new update is not lost while an earlier
+        // update for the same opportunity is waiting or actively being processed.
+        const eventId = crypto.createHash('sha256')
+          .update(JSON.stringify([appId, locationId, opportunityId, eventType, webhookId ?? payloadHash]))
+          .digest('hex');
+        await queue.add(jobName, jobData, {
+          ...retryOptions,
+          jobId: `opportunity_${eventId}`,
+          delay: 0
         });
       } else {
         await enqueueDebouncedJob({
